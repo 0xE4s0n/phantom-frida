@@ -146,6 +146,13 @@ jobs:
           path: output/*.gz
           retention-days: 30
 
+      - name: Upload gadget artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.custom_name }}-gadget-${{ inputs.frida_version }}
+          path: output/*.gz
+          retention-days: 30
+
       - name: Upload uncompressed binaries
         uses: actions/upload-artifact@v4
         with:

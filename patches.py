@@ -53,6 +53,18 @@ def get_required_file_patches(name: str) -> list[RequiredFilePatch]:
             f'"/{name}-zymbiote-',
         ),
         RequiredFilePatch(
+            "subprojects/frida-core/lib/base/session.vala",
+            "frida-server",
+            f"{name}-server",
+            minimum=2,
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/src/socket/socket-host-session.vala",
+            "frida-server",
+            f"{name}-server",
+            minimum=4,
+        ),
+        RequiredFilePatch(
             "subprojects/frida-core/lib/payload/exit-monitor.vala",
             (
                 """\t\tconstruct {

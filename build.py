@@ -58,7 +58,7 @@ NDK_URL = f"https://dl.google.com/android/repository/android-ndk-{NDK_VERSION}-l
 NDK_ARCHIVE_SHA1 = "87e2bb7e9be5d6a1c6cdf5ec40dd4e0c6d07c30b"
 ALL_ARCHS = ["android-arm64", "android-arm", "android-x86_64", "android-x86"]
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
-NAME_PATTERN = re.compile(r"^[a-z][a-z0-9]{2,31}$")
+NAME_PATTERN = re.compile(r"^[a-z][a-z0-9]{2,19}$")
 ANDROID_FALLBACK_ROOTS = (
     Path("/usr/local/lib/android/sdk"),
     Path("/usr/local/lib/android"),
@@ -70,6 +70,9 @@ FORBIDDEN_BINARY_MARKERS = (
     b"frida-server",
     b"frida-helper",
 )
+ZYMBIOTE_ARCHITECTURES = ("arm", "arm64", "x86", "x86_64")
+ZYMBIOTE_SOCKET_FIELD_SIZE = 64
+ZYMBIOTE_SOCKET_TOKEN = b"0" * 32
 
 
 class BuildError(RuntimeError):
@@ -137,7 +140,7 @@ def validate_custom_name(value: str) -> str:
     normalized = value.lower()
     if NAME_PATTERN.fullmatch(normalized) is None:
         raise BuildError(
-            "Custom name must be 3-32 lowercase letters or digits and start with a letter"
+            "Custom name must be 3-20 lowercase letters or digits and start with a letter"
         )
     return normalized
 
@@ -595,7 +598,40 @@ def apply_required_file_patches(frida_dir: Path, custom_name: str) -> None:
                 f"Required pattern {patch.old!r} occurred {count} times in "
                 f"{patch.relative_path}; expected at least {patch.minimum}"
             )
-        log(f"  [required] {patch.relative_path}: {patch.old} ({count})", "OK")
+        log(f"  [required] {patch.relative_path}: {count} replacement(s)", "OK")
+
+
+def patch_zymbiote_artifacts(frida_dir: Path, custom_name: str) -> None:
+    """Patch the fixed-size socket field in Frida's tracked helper ELFs."""
+    old_socket = b"/frida-zymbiote-" + ZYMBIOTE_SOCKET_TOKEN
+    new_socket = f"/{custom_name}-zymbiote-".encode() + ZYMBIOTE_SOCKET_TOKEN
+    if len(new_socket) >= ZYMBIOTE_SOCKET_FIELD_SIZE:
+        raise BuildError("Custom name does not fit the zymbiote socket field")
+
+    old_field = old_socket.ljust(ZYMBIOTE_SOCKET_FIELD_SIZE, b"\0")
+    new_field = new_socket.ljust(ZYMBIOTE_SOCKET_FIELD_SIZE, b"\0")
+    artifacts = frida_dir / "subprojects/frida-core/src/linux/helpers/artifacts/native"
+
+    for architecture in ZYMBIOTE_ARCHITECTURES:
+        target = artifacts / architecture / "zymbiote.elf"
+        relative_path = target.relative_to(frida_dir).as_posix()
+        if not target.is_file():
+            raise BuildError(f"Required zymbiote artifact is missing: {relative_path}")
+
+        data = target.read_bytes()
+        count = data.count(old_field)
+        if count != 1:
+            raise BuildError(
+                f"Required socket field occurred {count} times in {relative_path}; expected 1"
+            )
+
+        patched = data.replace(old_field, new_field)
+        with TemporaryDirectory(dir=target.parent, prefix=".zymbiote-patch-") as temporary:
+            staged = Path(temporary) / target.name
+            staged.write_bytes(patched)
+            shutil.copymode(target, staged)
+            os.replace(staged, target)
+        log(f"  [required] {relative_path}: socket field patched", "OK")
 
 
 def apply_source_patches(frida_dir: Path, custom_name: str):
@@ -605,6 +641,7 @@ def apply_source_patches(frida_dir: Path, custom_name: str):
     log("=" * 60, "HEADER")
 
     apply_required_file_patches(frida_dir, custom_name)
+    patch_zymbiote_artifacts(frida_dir, custom_name)
 
     cap_name = custom_name[0].upper() + custom_name[1:]
 

@@ -1,165 +1,178 @@
 name: Build Custom Frida
 
 on:
+  workflow_call:
+    inputs:
+      frida_version:
+        description: Frida version
+        required: false
+        type: string
+        default: "17.16.3"
+      custom_name:
+        description: Replacement for the internal Frida name
+        required: false
+        type: string
+        default: ajeossida
+      arch:
+        description: Comma-separated target architectures
+        required: false
+        type: string
+        default: android-arm64
+      port:
+        description: Custom port; empty keeps the upstream default
+        required: false
+        type: string
+        default: ""
+      extended:
+        description: Apply extended anti-detection patches
+        required: false
+        type: boolean
+        default: true
+      temp_fixes:
+        description: Apply optional temporary stability fixes
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       frida_version:
-        description: 'Frida version (e.g. 17.7.2)'
+        description: Frida version
         required: true
-        default: '17.7.2'
+        type: string
+        default: "17.16.3"
       custom_name:
-        description: 'Custom name (replaces "frida" everywhere)'
+        description: Replacement for the internal Frida name
         required: true
-        default: 'ajeossida'
+        type: string
+        default: ajeossida
       arch:
-        description: 'Target architecture(s)'
+        description: Target architecture(s)
         required: true
-        default: 'android-arm64'
         type: choice
+        default: android-arm64
         options:
           - android-arm64
           - android-arm
           - android-arm64,android-arm
           - android-arm64,android-arm,android-x86_64,android-x86
       port:
-        description: 'Custom port (empty = keep 27042)'
+        description: Custom port; empty keeps the upstream default
         required: false
-        default: ''
+        type: string
+        default: ""
       extended:
-        description: 'Extended anti-detection (D-Bus, symbols, binary sweep)'
+        description: Apply extended anti-detection patches
         required: false
         type: boolean
         default: true
       temp_fixes:
-        description: 'Stability fixes (perfetto skip, cloak detach)'
+        description: Apply optional temporary stability fixes
         required: false
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
+    name: build
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 180
+    env:
+      ARCHITECTURES: ${{ inputs.arch }}
+      CUSTOM_NAME: ${{ inputs.custom_name }}
+      CUSTOM_PORT: ${{ inputs.port }}
+      EXTENDED_PATCHES: ${{ inputs.extended }}
+      FRIDA_VERSION: ${{ inputs.frida_version }}
+      NDK_ARCHIVE_SHA1: 87e2bb7e9be5d6a1c6cdf5ec40dd4e0c6d07c30b
+      NDK_ARCHIVE_URL: https://dl.google.com/android/repository/android-ndk-r29-linux.zip
+      TEMPORARY_FIXES: ${{ inputs.temp_fixes }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Check out builder
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - name: System info
-        run: |
-          echo "CPUs: $(nproc)"
-          echo "RAM: $(free -h | grep Mem | awk '{print $2}')"
-          echo "Disk: $(df -h / | tail -1 | awk '{print $4}') free"
-          python3 --version
-          git --version
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Set up Java
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential curl git python3 unzip
+          sudo apt-get install --yes build-essential curl git unzip
 
-      # Cache NDK (~1.5 GB) — saves ~3 min on subsequent runs
-      - name: Cache NDK
-        uses: actions/cache@v4
+      - name: Restore immutable NDK
         id: ndk-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: build/android-ndk-r29
-          key: ndk-r29-linux
+          key: android-ndk-r29-linux-87e2bb7e9be5d6a1c6cdf5ec40dd4e0c6d07c30b
 
-      - name: Download NDK
+      - name: Download and verify NDK
         if: steps.ndk-cache.outputs.cache-hit != 'true'
         run: |
+          archive="$RUNNER_TEMP/android-ndk-r29-linux.zip"
           mkdir -p build
-          curl -L -o build/android-ndk-r29-linux.zip \
-            https://dl.google.com/android/repository/android-ndk-r29-linux.zip
-          cd build && unzip -q android-ndk-r29-linux.zip && rm android-ndk-r29-linux.zip
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$archive" "$NDK_ARCHIVE_URL"
+          printf '%s  %s\n' "$NDK_ARCHIVE_SHA1" "$archive" | sha1sum --check -
+          unzip -q "$archive" -d build
 
-      # Cache Frida source tree — saves ~5 min clone time
-      - name: Cache Frida source
-        uses: actions/cache@v4
-        id: frida-cache
-        with:
-          path: build/frida
-          key: frida-${{ inputs.frida_version }}-source
-
-      - name: Clone Frida
-        if: steps.frida-cache.outputs.cache-hit != 'true'
+      - name: Validate NDK installation
         run: |
-          git clone --recurse-submodules --branch ${{ inputs.frida_version }} --depth 1 \
-            https://github.com/frida/frida.git build/frida
-
-      # If cache hit, we need a fresh copy (patches are destructive)
-      - name: Prepare fresh source from cache
-        if: steps.frida-cache.outputs.cache-hit == 'true'
-        run: |
-          # Restore to clean state (including build dir — patches are destructive)
-          cd build/frida
-          git checkout -- .
-          git submodule foreach --recursive 'git checkout -- . || true'
-          git clean -fdx || true
-          rm -rf build/
-
-      - name: Build command
-        id: cmd
-        run: |
-          CMD="python3 build.py --version ${{ inputs.frida_version }}"
-          CMD="$CMD --name ${{ inputs.custom_name }}"
-          CMD="$CMD --arch ${{ inputs.arch }}"
-          CMD="$CMD --skip-clone --ndk-path build/android-ndk-r29"
-          CMD="$CMD --verify"
-
-          if [ -n "${{ inputs.port }}" ]; then
-            CMD="$CMD --port ${{ inputs.port }}"
-          fi
-
-          if [ "${{ inputs.extended }}" = "true" ]; then
-            CMD="$CMD --extended"
-          fi
-
-          if [ "${{ inputs.temp_fixes }}" = "true" ]; then
-            CMD="$CMD --temp-fixes"
-          fi
-
-          echo "cmd=$CMD" >> $GITHUB_OUTPUT
-          echo "Will run: $CMD"
+          grep -Fqx 'Pkg.Revision = 29.0.14206865' \
+            build/android-ndk-r29/source.properties
 
       - name: Apply patches and build
-        run: ${{ steps.cmd.outputs.cmd }}
-
-      - name: List artifacts
         run: |
-          echo "=== Build artifacts ==="
-          ls -lh output/
-          echo ""
-          echo "=== Binary verification ==="
-          for f in output/*; do
-            if [[ ! "$f" == *.gz ]]; then
-              count=$(strings "$f" | grep -c "frida" || true)
-              echo "$f: $count residual 'frida' strings"
-            fi
-          done
+          command=(
+            python3 build.py
+            --version "$FRIDA_VERSION"
+            --name "$CUSTOM_NAME"
+            --arch "$ARCHITECTURES"
+            --ndk-path build/android-ndk-r29
+            --verify
+          )
 
-      - name: Upload server artifacts
-        uses: actions/upload-artifact@v4
+          if [[ -n "$CUSTOM_PORT" ]]; then
+            command+=(--port "$CUSTOM_PORT")
+          fi
+          if [[ "$EXTENDED_PATCHES" == "true" ]]; then
+            command+=(--extended)
+          fi
+          if [[ "$TEMPORARY_FIXES" == "true" ]]; then
+            command+=(--temp-fixes)
+          fi
+
+          printf 'Running:'
+          printf ' %q' "${command[@]}"
+          printf '\n'
+          "${command[@]}"
+
+      - name: Verify release assets
+        run: |
+          python3 -m json.tool output/build-info.json > /dev/null
+          cd output
+          sha256sum --check SHA256SUMS
+
+      - name: Upload verified build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ inputs.custom_name }}-server-${{ inputs.frida_version }}
-          path: output/${{ inputs.custom_name }}-server-*.gz
+          name: phantom-frida-build
+          path: output/
+          if-no-files-found: error
           retention-days: 30
-          if-no-files-found: warn
-
-      - name: Upload gadget artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.custom_name }}-gadget-${{ inputs.frida_version }}
-          path: output/${{ inputs.custom_name }}-gadget-*.gz
-          retention-days: 30
-          if-no-files-found: ignore
-
-      - name: Upload uncompressed binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.custom_name }}-${{ inputs.frida_version }}-uncompressed
-          path: |
-            output/*
-            !output/*.gz
-          retention-days: 7

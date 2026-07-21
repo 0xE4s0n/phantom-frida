@@ -6,8 +6,8 @@ explicitly changes that contract.
 
 ## Local setup
 
-Use Python 3.12, Node.js, Go, and Bash. Install the pinned development and
-JavaScript dependencies:
+Use Python 3.12, Node.js 24.13.1, Go, and Bash. Install the pinned development
+and JavaScript dependencies:
 
 ```bash
 python -m pip install --requirement requirements-dev.txt

@@ -48,7 +48,8 @@ Requirements:
 
 - Ubuntu 22.04 or newer (WSL is supported);
 - Python 3.10 or newer;
-- Git, curl, unzip, a C/C++ toolchain, and JDK 17;
+- Git, curl, unzip, a C/C++ toolchain, JDK 17, and Node.js 18 or newer
+  (CI uses Node.js 24.13.1);
 - Android SDK platform and build-tools containing `android.jar` and D8;
 - about 20 GB of free disk space.
 

@@ -283,3 +283,24 @@ def test_ensure_ndk_rejects_cached_archive_with_wrong_checksum(
         build.ensure_ndk(tmp_path)
 
     assert commands == []
+
+
+def test_build_prerequisites_require_node_before_a_full_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checked: list[str] = []
+
+    def require(name: str) -> str:
+        checked.append(name)
+        if name == "node":
+            raise build.BuildError("Required executable is missing: node")
+        return f"/usr/bin/{name}"
+
+    monkeypatch.setattr(build, "require_executable", require)
+    monkeypatch.setattr(build, "find_android_jar", lambda: tmp_path / "android.jar")
+    monkeypatch.setattr(build, "find_d8_command", lambda: ["d8"])
+
+    with pytest.raises(build.BuildError, match="node"):
+        build.validate_build_prerequisites(skip_build=False)
+
+    assert checked == ["git", "java", "javac", "jar", "make", "node"]

@@ -233,6 +233,17 @@ def find_d8_command() -> list[str]:
     raise BuildError("Required Android build tool is missing: d8")
 
 
+def validate_build_prerequisites(*, skip_build: bool) -> None:
+    """Fail before downloads or patching when required build tools are absent."""
+    for executable in ("git", "java", "javac", "jar"):
+        require_executable(executable)
+    if not skip_build:
+        for executable in ("make", "node"):
+            require_executable(executable)
+    find_android_jar()
+    find_d8_command()
+
+
 def detect_frida_major(version: str) -> int:
     return int(version.split(".")[0])
 
@@ -1212,6 +1223,7 @@ Transformations and verification boundaries:
     custom_name = validate_custom_name(args.name)
     archs = parse_architectures(args.arch)
     port = validate_port(args.port)
+    validate_build_prerequisites(skip_build=args.skip_build)
 
     # Directories
     script_dir = Path(__file__).parent.resolve()

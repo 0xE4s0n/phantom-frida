@@ -18,7 +18,41 @@ Source verification notes (17.7.2):
   - gumprocess-linux.c uses entry->name, NOT details.name
 """
 
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class RequiredFilePatch:
+    """A source contract whose absence must stop the build."""
+
+    relative_path: str
+    old: str
+    new: str
+    minimum: int = 1
+
+
+def get_required_file_patches(name: str) -> list[RequiredFilePatch]:
+    """Return exact Frida source patches required for Android runtime correctness."""
+    linux_host_session = "subprojects/frida-core/src/linux/linux-host-session.vala"
+    return [
+        RequiredFilePatch(
+            linux_host_session,
+            "re/frida/HelperBackend",
+            f"re/{name}/HelperBackend",
+        ),
+        RequiredFilePatch(
+            linux_host_session,
+            '"/frida-zymbiote-',
+            f'"/{name}-zymbiote-',
+            minimum=2,
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/src/linux/helpers/zymbiote.c",
+            '"/frida-zymbiote-',
+            f'"/{name}-zymbiote-',
+        ),
+    ]
 
 
 # ============================================================================
@@ -67,9 +101,6 @@ def get_source_patches(name: str, cap_name: str) -> list[tuple[str, str]]:
 
         # --- JS engine thread name (visible in /proc/pid/task/tid/status) ---
         ('"gum-js-loop"', f'"{name}-js-loop"'),
-
-        # --- [E] Extended: internal Frida path references ---
-        ("'frida'", f"'{name}'"),  # Generic single-quoted 'frida'
 
         # --- [E] Extended: asset directory name ---
         ("/ 'frida'", f"/ '{name}'"),  # root_asset_dir = libdir / 'frida'
@@ -137,8 +168,8 @@ def get_targeted_patches(name: str, cap_name: str, target: str) -> list[tuple[st
             ('"frida-gadget.dylib"', f'"{name}-gadget.dylib"'),
             ('"frida-gadget.so"', f'"{name}-gadget.so"'),
             # Cross-arch naming
-            (f'"frida-server-"', f'"{name}-server-"'),
-            (f'"frida-gadget-"', f'"{name}-gadget-"'),
+            ('"frida-server-"', f'"{name}-server-"'),
+            ('"frida-gadget-"', f'"{name}-gadget-"'),
         ]
 
     elif target == "core_meson":
@@ -363,29 +394,6 @@ def get_temp_path_patches(name: str) -> list[tuple[str, str]]:
 
 
 # ============================================================================
-# [E] EXTENDED: TRANSPORT/PROTOCOL PATCHES
-# ============================================================================
-
-def get_transport_patches(name: str) -> list[tuple[str, str]]:
-    """
-    Patch transport-layer identifiers that can be fingerprinted.
-    These appear in D-Bus messages, auth tokens, and IPC.
-    """
-    return [
-        # D-Bus interface names
-        ('"re.frida.HostSession"', f'"re.{name}.HostSession"'),
-        ('"re.frida.AgentSession"', f'"re.{name}.AgentSession"'),
-        ('"re.frida.AgentController"', f'"re.{name}.AgentController"'),
-        ('"re.frida.TransportBroker"', f'"re.{name}.TransportBroker"'),
-        ('"re.frida.PortalSession"', f'"re.{name}.PortalSession"'),
-        ('"re.frida.BusSession"', f'"re.{name}.BusSession"'),
-        ('"re.frida.AuthenticationService"', f'"re.{name}.AuthenticationService"'),
-        # Generic re.frida.* catch-all (after specific ones)
-        ('"re.frida.', f'"re.{name}.'),
-    ]
-
-
-# ============================================================================
 # [E] EXTENDED: INTERNAL IDENTIFIER PATCHES
 # ============================================================================
 
@@ -401,7 +409,7 @@ def get_internal_patches(name: str, cap_name: str) -> list[tuple[str, str]]:
     The binary string sweep (--extended) handles any residual 'frida' in the final binary.
     """
     return [
-        # GType names (visible via GObject introspection) — these are string literals, safe to rename
+        # GType names visible through GObject introspection; these literals are safe to rename.
         ("FridaServer", f"{cap_name}Server"),
         ("FridaGadget", f"{cap_name}Gadget"),
         ("FridaPortal", f"{cap_name}Portal"),
@@ -420,7 +428,10 @@ def get_stability_patches_17(frida_dir: Path) -> list[dict]:
     """
     return [
         {
-            "description": "Skip perfetto_hprof_ thread during enumeration (prevents SEGV on some devices)",
+            "description": (
+                "Skip perfetto_hprof_ thread during enumeration "
+                "(prevents SEGV on some devices)"
+            ),
             "file": "subprojects/frida-gum/gum/backend-linux/gumprocess-linux.c",
             # Verified 17.7.2: variable is entry->name, NOT details.name
             "old": "    carry_on = func (entry, user_data);",
@@ -434,7 +445,7 @@ def get_stability_patches_17(frida_dir: Path) -> list[dict]:
 
 
 # ============================================================================
-# SUMMARY — all detection vectors covered
+# SUMMARY — detection scope and compatibility boundaries
 # ============================================================================
 
 DETECTION_VECTORS = """
@@ -452,11 +463,14 @@ Detection vectors addressed:
 
 [E] Extended (new, use --extended):
  9. Default port:            27042 -- configurable (apps scan this port)
-10. D-Bus interfaces:        re.frida.HostSession etc. -- renamed
-11. Internal C symbols:      frida_init, frida_version -- renamed
-12. GType names:             FridaServer, FridaGadget -- renamed
-13. Temp file paths:         .frida, frida- prefixes -- renamed
-14. Binary string residuals: Post-compilation sweep for frida/Frida/FRIDA
-15. Build config defines:    FRIDA_HELPER_PATH, FRIDA_AGENT_PATH -- renamed
-16. Asset directory:         libdir/frida -- libdir/custom
+10. GType names:             FridaServer, FridaGadget -- renamed
+11. Temp file paths:         .frida, frida- prefixes -- renamed
+12. Runtime markers:         post-build sweep outside protected DEX regions
+13. Build config defines:    FRIDA_HELPER_PATH, FRIDA_AGENT_PATH -- renamed
+14. Asset directory:         libdir/frida -- libdir/custom
+
+Compatibility identifiers intentionally preserved:
+ - D-Bus protocol interfaces under re.frida.* and /re/frida/GadgetSession
+ - Public capital Frida API names and generated C ABI symbols required by stock clients
+ - Allowlisted protocol strings; verification does not claim every "frida" substring is removed
 """

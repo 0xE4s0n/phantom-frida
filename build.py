@@ -39,6 +39,7 @@ from patches import (
     get_binary_string_patches,
     get_internal_patches,
     get_port_patches,
+    get_required_file_patches,
     get_rollback_patches,
     get_source_patches,
     get_stability_patches_17,
@@ -481,11 +482,29 @@ def rebuild_helper_dex(frida_dir: Path, custom_name: str):
         log("  classes.dex not generated, keeping pre-compiled DEX", "WARN")
 
 
+def apply_required_file_patches(frida_dir: Path, custom_name: str) -> None:
+    """Apply source contracts that must match the supported Frida source shape."""
+    for patch in get_required_file_patches(custom_name):
+        target = frida_dir / patch.relative_path
+        if not target.is_file():
+            raise BuildError(f"Required patch file is missing: {patch.relative_path}")
+
+        count = replace_in_file(target, patch.old, patch.new)
+        if count < patch.minimum:
+            raise BuildError(
+                f"Required pattern {patch.old!r} occurred {count} times in "
+                f"{patch.relative_path}; expected at least {patch.minimum}"
+            )
+        log(f"  [required] {patch.relative_path}: {patch.old} ({count})", "OK")
+
+
 def apply_source_patches(frida_dir: Path, custom_name: str):
     """Apply global recursive string replacements across the source tree."""
     log("=" * 60, "HEADER")
     log("PHASE 1: Global source patches", "STEP")
     log("=" * 60, "HEADER")
+
+    apply_required_file_patches(frida_dir, custom_name)
 
     cap_name = custom_name[0].upper() + custom_name[1:]
 

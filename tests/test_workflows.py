@@ -94,6 +94,20 @@ def test_scheduled_build_separates_read_build_from_write_release() -> None:
     assert "actions/attest-build-provenance@" in text
 
 
+def test_scheduled_release_is_pinned_to_the_device_verified_version() -> None:
+    text = workflow_text("scheduled-build.yml")
+    assert "inputs.frida_version || '17.16.3'" in text
+    assert 'if [[ "$version" != "17.16.3" ]]' in text
+    assert "releases/latest" not in text
+
+
+def test_release_publishes_every_file_covered_by_sha256sums() -> None:
+    text = workflow_text("scheduled-build.yml")
+    release_command = text.split('gh release create "$tag"', 1)[1]
+    assert "release-assets/*" in release_command
+    assert "release-assets/*.gz" not in release_command
+
+
 def test_dependabot_updates_pinned_actions_weekly() -> None:
     text = Path(".github/dependabot.yml").read_text(encoding="utf-8")
     assert "package-ecosystem: github-actions" in text

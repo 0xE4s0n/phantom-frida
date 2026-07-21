@@ -6,10 +6,10 @@ on:
   workflow_dispatch:
     inputs:
       frida_version:
-        description: Frida version; empty resolves the latest release
+        description: Device-verified Frida version
         required: false
         type: string
-        default: ""
+        default: "17.16.3"
       arch:
         description: Target architecture(s)
         required: true
@@ -33,9 +33,8 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
-      GH_TOKEN: ${{ github.token }}
       REQUESTED_ARCHITECTURES: ${{ inputs.arch || 'android-arm64' }}
-      REQUESTED_VERSION: ${{ inputs.frida_version || '' }}
+      REQUESTED_VERSION: ${{ inputs.frida_version || '17.16.3' }}
     outputs:
       arch: ${{ steps.resolve.outputs.arch }}
       name: ${{ steps.resolve.outputs.name }}
@@ -56,23 +55,13 @@ jobs:
       - name: Resolve and validate inputs
         id: resolve
         run: |
-          version="$REQUESTED_VERSION"
-          if [[ -z "$version" ]]; then
-            for attempt in 1 2 3; do
-              if version=$(gh api repos/frida/frida/releases/latest --jq .tag_name); then
-                break
-              fi
-              if [[ "$attempt" == "3" ]]; then
-                echo "Unable to resolve the latest Frida release" >&2
-                exit 1
-              fi
-              sleep "$((attempt * 5))"
-            done
-          fi
-
           version=$(python3 -c \
             'import build, sys; print(build.validate_version(sys.argv[1]))' \
-            "$version")
+            "$REQUESTED_VERSION")
+          if [[ "$version" != "17.16.3" ]]; then
+            echo "Automatic releases are limited to device-verified Frida 17.16.3" >&2
+            exit 1
+          fi
           arch=$(python3 -c \
             'import build, sys; print(",".join(build.parse_architectures(sys.argv[1])))' \
             "$REQUESTED_ARCHITECTURES")
@@ -175,9 +164,7 @@ jobs:
           } > "$notes"
 
           gh release create "$tag" \
-            release-assets/*.gz \
-            release-assets/build-info.json \
-            release-assets/SHA256SUMS \
+            release-assets/* \
             --title "$title" \
             --notes-file "$notes"
 

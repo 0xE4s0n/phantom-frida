@@ -1,5 +1,6 @@
+import json
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -15,6 +16,25 @@ def test_proc_scan_accepts_custom_runtime_names() -> None:
     android_smoke.assert_clean_proc_text(
         "unix", "@/oemcodec-zymbiote-deadbeef\n/data/local/tmp/oemcodec-server"
     )
+
+
+def test_proc_scan_uses_portable_single_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[str] = []
+
+    def fake_root_shell(_serial: str, command: str) -> SimpleNamespace:
+        commands.append(command)
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(android_smoke, "root_shell", fake_root_shell)
+
+    android_smoke._scan_process_procfs("SERIAL-1", 123)
+
+    assert commands == [
+        "cat /proc/net/unix",
+        "cat /proc/123/maps",
+        "ls -l /proc/123/fd",
+        "cat /proc/123/task/*/comm",
+    ]
 
 
 def test_gadget_port_does_not_collide_with_server() -> None:
@@ -51,7 +71,11 @@ def test_server_start_command_uses_fixed_adb_argument_vector() -> None:
         "shell",
         "su",
         "-c",
-        ("/data/local/tmp/phantom-frida-test/oemcodec-server -l 0.0.0.0:27142 -D"),
+        (
+            "/data/local/tmp/phantom-frida-test/oemcodec-server "
+            "-l 0.0.0.0:27142 -D </dev/null "
+            ">/data/local/tmp/phantom-frida-test/server.log 2>&1"
+        ),
     ]
 
 
@@ -184,3 +208,24 @@ def test_agent_is_bundled_with_frida_compiler(
     assert android_smoke._compile_agent(FakeFrida(), script) == "bundled-agent"
     assert calls["entrypoint"] == str(script)
     assert calls["project_root"] == str(android_smoke.REPOSITORY_ROOT)
+
+
+def test_acceptance_agent_uses_frida_17_file_and_java_wrapper_apis() -> None:
+    source = (android_smoke.REPOSITORY_ROOT / "test_comprehensive.js").read_text(encoding="utf-8")
+
+    assert ".readAllText()" not in source
+    assert source.count("File.readAllText(") == 2
+    assert "Java.cast(iterator.next(), Thread).getName()" in source
+
+
+def test_report_writer_omits_device_serial(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.json"
+
+    android_smoke._write_report(
+        report_path,
+        {"status": "passed", "device_serial": "SECRET-SERIAL"},
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "passed"
+    assert "device_serial" not in report

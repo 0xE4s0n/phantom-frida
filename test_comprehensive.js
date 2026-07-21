@@ -23,9 +23,7 @@ setTimeout(function () {
 
     // 1. /proc/self/maps
     try {
-        var mapsFile = new File('/proc/self/maps', 'r');
-        var maps = mapsFile.readAllText();
-        mapsFile.close();
+        var maps = File.readAllText('/proc/self/maps');
         var mapLines = maps.split('\n');
         for (var mapIndex = 0; mapIndex < mapLines.length; mapIndex++) {
             if (mapLines[mapIndex].toLowerCase().indexOf('frida') >= 0) {
@@ -41,12 +39,10 @@ setTimeout(function () {
         var threads = Process.enumerateThreads();
         for (var threadIndex = 0; threadIndex < threads.length; threadIndex++) {
             try {
-                var commFile = new File(
-                    '/proc/self/task/' + threads[threadIndex].id + '/comm',
-                    'r'
+                var threadName = File.readAllText(
+                    '/proc/self/task/' + threads[threadIndex].id + '/comm'
                 );
-                var threadName = commFile.readAllText().trim();
-                commFile.close();
+                threadName = threadName.trim();
                 var loweredThread = threadName.toLowerCase();
                 if (
                     loweredThread.indexOf('frida') >= 0 ||
@@ -131,7 +127,7 @@ setTimeout(function () {
                     var threadSet = Thread.getAllStackTraces();
                     var iterator = threadSet.keySet().iterator();
                     while (iterator.hasNext()) {
-                        var javaThreadName = iterator.next().getName();
+                        var javaThreadName = Java.cast(iterator.next(), Thread).getName();
                         var loweredJavaThread = javaThreadName.toLowerCase();
                         if (
                             loweredJavaThread.indexOf('frida') >= 0 ||

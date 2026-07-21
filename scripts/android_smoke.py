@@ -68,6 +68,7 @@ def require_single_device(adb_output: str) -> str:
 
 
 def server_start_command(serial: str, remote_server: str, port: int) -> list[str]:
+    remote_log = f"{REMOTE_DIR}/server.log"
     return [
         "adb",
         "-s",
@@ -75,7 +76,7 @@ def server_start_command(serial: str, remote_server: str, port: int) -> list[str
         "shell",
         "su",
         "-c",
-        f"{remote_server} -l 0.0.0.0:{port} -D",
+        (f"{remote_server} -l 0.0.0.0:{port} -D </dev/null >{remote_log} 2>&1"),
     ]
 
 
@@ -296,7 +297,7 @@ def _scan_process_procfs(serial: str, pid: int) -> None:
         "unix": "cat /proc/net/unix",
         "maps": f"cat /proc/{pid}/maps",
         "fds": f"ls -l /proc/{pid}/fd",
-        "threads": (f'for file in /proc/{pid}/task/*/comm; do cat "$file"; done'),
+        "threads": f"cat /proc/{pid}/task/*/comm",
     }
     for label, command in commands.items():
         result = root_shell(serial, command)
@@ -426,7 +427,6 @@ def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str
     remote_server, remote_gadget = _prepare_remote_files(config, serial)
     manager = frida_module.get_device_manager()
     report: dict[str, object] = {
-        "device_serial": serial,
         "frida_version": str(frida_module.__version__),
         "package": config.package,
         "server_port": config.port,
@@ -451,7 +451,7 @@ def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str
 def _write_report(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        **payload,
+        **{key: value for key, value in payload.items() if key != "device_serial"},
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
     path.write_text(

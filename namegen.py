@@ -6,45 +6,151 @@ with legitimate system components. Names avoid any association with
 known tool names that might be blacklisted.
 """
 
-import hashlib
 import random
-import string
-import time
-
+from datetime import datetime, timezone
 
 # Word parts that look like legitimate Android/Linux library names
 PREFIXES = [
-    "lib", "sys", "dex", "art", "jit", "hwc", "gpu", "ndk",
-    "arm", "elf", "ion", "ipc", "rpc", "hal", "app", "net",
-    "ssl", "tls", "icu", "zst", "lz4", "bpf", "usb", "hid",
-    "cam", "aud", "vid", "gfx", "vnd", "oem", "soc", "mtp",
+    "lib",
+    "sys",
+    "dex",
+    "art",
+    "jit",
+    "hwc",
+    "gpu",
+    "ndk",
+    "arm",
+    "elf",
+    "ion",
+    "ipc",
+    "rpc",
+    "hal",
+    "app",
+    "net",
+    "ssl",
+    "tls",
+    "icu",
+    "zst",
+    "lz4",
+    "bpf",
+    "usb",
+    "hid",
+    "cam",
+    "aud",
+    "vid",
+    "gfx",
+    "vnd",
+    "oem",
+    "soc",
+    "mtp",
 ]
 
 MIDDLES = [
-    "bridge", "helper", "core", "base", "native", "proxy",
-    "service", "render", "codec", "engine", "parser", "binder",
-    "loader", "mapper", "tracer", "linker", "daemon", "module",
-    "stream", "buffer", "cache", "store", "alloc", "guard",
-    "filter", "router", "socket", "tunnel", "thread", "signal",
+    "bridge",
+    "helper",
+    "core",
+    "base",
+    "native",
+    "proxy",
+    "service",
+    "render",
+    "codec",
+    "engine",
+    "parser",
+    "binder",
+    "loader",
+    "mapper",
+    "tracer",
+    "linker",
+    "daemon",
+    "module",
+    "stream",
+    "buffer",
+    "cache",
+    "store",
+    "alloc",
+    "guard",
+    "filter",
+    "router",
+    "socket",
+    "tunnel",
+    "thread",
+    "signal",
 ]
 
 SUFFIXES = [
-    "rt", "ng", "ex", "v2", "io", "dl", "hq", "os", "vm",
-    "xt", "fx", "ax", "mx", "px", "dx", "kr", "lm", "sv",
+    "rt",
+    "ng",
+    "ex",
+    "v2",
+    "io",
+    "dl",
+    "hq",
+    "os",
+    "vm",
+    "xt",
+    "fx",
+    "ax",
+    "mx",
+    "px",
+    "dx",
+    "kr",
+    "lm",
+    "sv",
 ]
 
 # Complete plausible names (look like real Android components)
 PLAUSIBLE_NAMES = [
-    "arthelper", "dexcache", "hwbridge", "nativeio", "jitcodec",
-    "sysrender", "halproxy", "binderng", "netlayer", "armlinker",
-    "ipcmodule", "gpualloc", "elfloader", "ionbuffer", "socengine",
-    "rpcbridge", "oemcodec", "audiomix", "camstack", "gfxpipe",
-    "threadmgr", "shmproxy", "signalhub", "pidmonit", "vmruntime",
-    "libcutils", "libnative", "libbinder", "libhwcomp", "libsensor",
-    "surfacemgr", "inputproc", "rendereng", "codecserv", "mediacore",
-    "cryptohlp", "keymaster", "bootanim", "logdaemon", "ashmemgr",
-    "voldproxy", "rildserv", "btservice", "wificore", "nfcstack",
-    "grallochp", "eglstream", "vulkanldr", "skiaback", "harfbuzz",
+    "arthelper",
+    "dexcache",
+    "hwbridge",
+    "nativeio",
+    "jitcodec",
+    "sysrender",
+    "halproxy",
+    "binderng",
+    "netlayer",
+    "armlinker",
+    "ipcmodule",
+    "gpualloc",
+    "elfloader",
+    "ionbuffer",
+    "socengine",
+    "rpcbridge",
+    "oemcodec",
+    "audiomix",
+    "camstack",
+    "gfxpipe",
+    "threadmgr",
+    "shmproxy",
+    "signalhub",
+    "pidmonit",
+    "vmruntime",
+    "libcutils",
+    "libnative",
+    "libbinder",
+    "libhwcomp",
+    "libsensor",
+    "surfacemgr",
+    "inputproc",
+    "rendereng",
+    "codecserv",
+    "mediacore",
+    "cryptohlp",
+    "keymaster",
+    "bootanim",
+    "logdaemon",
+    "ashmemgr",
+    "voldproxy",
+    "rildserv",
+    "btservice",
+    "wificore",
+    "nfcstack",
+    "grallochp",
+    "eglstream",
+    "vulkanldr",
+    "skiaback",
+    "harfbuzz",
 ]
 
 
@@ -99,10 +205,11 @@ def generate_port(seed: str | None = None) -> int:
             return port
 
 
-def weekly_seed() -> str:
-    """Generate a seed based on the current ISO week number."""
-    now = time.gmtime()
-    return f"{now.tm_year}-W{now.tm_yday // 7:02d}"
+def weekly_seed(now: datetime | None = None) -> str:
+    """Return a stable UTC ISO year/week seed."""
+    current = now or datetime.now(timezone.utc)
+    iso_year, iso_week, _ = current.isocalendar()
+    return f"{iso_year}-W{iso_week:02d}"
 
 
 if __name__ == "__main__":
@@ -110,7 +217,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Generate random build names")
     parser.add_argument("--seed", "-s", default=None, help="Seed for reproducibility")
-    parser.add_argument("--weekly", "-w", action="store_true", help="Use weekly seed (same name per week)")
+    parser.add_argument(
+        "--weekly", "-w", action="store_true", help="Use weekly seed (same name per week)"
+    )
     parser.add_argument("--count", "-c", type=int, default=1, help="Number of names to generate")
     parser.add_argument("--port", "-p", action="store_true", help="Also generate a random port")
     parser.add_argument("--port-only", action="store_true", help="Output only the port number")

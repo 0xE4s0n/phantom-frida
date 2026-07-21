@@ -1,0 +1,8 @@
+{
+  "name": "phantom-frida-acceptance",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "frida-java-bridge": "7.0.13"
+  }
+}

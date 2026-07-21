@@ -1,140 +1,174 @@
-// Comprehensive test: Java bridge + anti-detection + hooks
-setTimeout(function() {
-    // === ANTI-DETECTION CHECKS ===
+'use strict';
+
+import Java from 'frida-java-bridge';
+
+// Structured acceptance test: native stealth markers, Java bridge, and a live hook.
+setTimeout(function () {
+    var failures = [];
+    var javaAvailable = typeof Java !== 'undefined' && Java.available;
+
+    function fail(label, error) {
+        var detail = error === undefined ? '' : ': ' + String(error);
+        failures.push(label + detail);
+        console.log('[FAIL] ' + label + detail);
+    }
+
+    function finish() {
+        send({
+            type: 'phantom-frida-result',
+            failures: failures,
+            javaAvailable: javaAvailable
+        });
+    }
 
     // 1. /proc/self/maps
-    var maps_clean = true;
     try {
-        var f = new File('/proc/self/maps', 'r');
-        var maps = f.readAllText();
-        f.close();
-        var lines = maps.split('\n');
-        for (var i = 0; i < lines.length; i++) {
-            if (lines[i].toLowerCase().indexOf('frida') >= 0) {
-                maps_clean = false;
-                console.log('[DETECT] maps: ' + lines[i].trim());
+        var maps = File.readAllText('/proc/self/maps');
+        var mapLines = maps.split('\n');
+        for (var mapIndex = 0; mapIndex < mapLines.length; mapIndex++) {
+            if (mapLines[mapIndex].toLowerCase().indexOf('frida') >= 0) {
+                fail('maps contains frida', mapLines[mapIndex].trim());
             }
         }
-    } catch(e) {}
-    console.log('[ANTIDETECT] maps: ' + (maps_clean ? 'CLEAN' : 'DETECTED'));
-
-    // 2. Thread names
-    var threads = Process.enumerateThreads();
-    var suspicious_threads = [];
-    for (var i = 0; i < threads.length; i++) {
-        try {
-            var f2 = new File('/proc/self/task/' + threads[i].id + '/comm', 'r');
-            var name = f2.readAllText().trim();
-            f2.close();
-            var lower = name.toLowerCase();
-            if (lower.indexOf('frida') >= 0 || name === 'gmain' || name === 'gdbus' ||
-                name === 'gum-js-loop' || name === 'pool-spawner') {
-                suspicious_threads.push(name);
-            }
-        } catch(e) {}
+    } catch (error) {
+        fail('maps scan failed', error);
     }
-    console.log('[ANTIDETECT] threads: ' + (suspicious_threads.length === 0 ? 'CLEAN' : 'DETECTED: ' + suspicious_threads.join(', ')));
 
-    // 3. Modules
-    var mods = Process.enumerateModules();
-    var frida_mods = [];
-    for (var i = 0; i < mods.length; i++) {
-        if (mods[i].name.toLowerCase().indexOf('frida') >= 0) {
-            frida_mods.push(mods[i].name);
-        }
-    }
-    console.log('[ANTIDETECT] modules: ' + (frida_mods.length === 0 ? 'CLEAN (' + mods.length + ' total)' : 'DETECTED: ' + frida_mods.join(', ')));
-
-    // 4. frida_agent_main export
+    // 2. Native thread names
     try {
-        var agent_main = Module.findExportByName(null, 'frida_agent_main');
-        console.log('[ANTIDETECT] frida_agent_main: ' + (agent_main === null ? 'CLEAN' : 'DETECTED @ ' + agent_main));
-    } catch(e) {
-        console.log('[ANTIDETECT] frida_agent_main: CLEAN (export lookup failed)');
+        var threads = Process.enumerateThreads();
+        for (var threadIndex = 0; threadIndex < threads.length; threadIndex++) {
+            try {
+                var threadName = File.readAllText(
+                    '/proc/self/task/' + threads[threadIndex].id + '/comm'
+                );
+                threadName = threadName.trim();
+                var loweredThread = threadName.toLowerCase();
+                if (
+                    loweredThread.indexOf('frida') >= 0 ||
+                    threadName === 'gmain' ||
+                    threadName === 'gdbus' ||
+                    threadName === 'gum-js-loop' ||
+                    threadName === 'pool-spawner'
+                ) {
+                    fail('suspicious native thread', threadName);
+                }
+            } catch (error) {
+                fail('native thread scan failed', error);
+            }
+        }
+    } catch (error) {
+        fail('thread enumeration failed', error);
     }
 
-    // === JAVA BRIDGE TESTS ===
-    if (typeof Java !== 'undefined' && Java.available) {
-        Java.perform(function() {
-            console.log('[JAVA] available: true');
-            console.log('[JAVA] android: ' + Java.androidVersion);
+    // 3. Loaded modules
+    try {
+        var modules = Process.enumerateModules();
+        for (var moduleIndex = 0; moduleIndex < modules.length; moduleIndex++) {
+            if (modules[moduleIndex].name.toLowerCase().indexOf('frida') >= 0) {
+                fail('module contains frida', modules[moduleIndex].name);
+            }
+        }
+    } catch (error) {
+        fail('module enumeration failed', error);
+    }
 
-            var classes = Java.enumerateLoadedClassesSync();
-            console.log('[JAVA] classes: ' + classes.length);
+    // 4. Export renamed during the two-pass build
+    try {
+        var agentMain = Module.findGlobalExportByName('frida_agent_main');
+        if (agentMain !== null) {
+            fail('frida_agent_main export is visible', agentMain);
+        }
+    } catch (error) {
+        fail('agent export lookup failed', error);
+    }
 
-            // Java.use tests
-            var tests = [
-                'java.lang.String',
-                'android.app.Activity',
-                'javax.crypto.Cipher',
-                'android.content.SharedPreferences',
-                'java.net.URL'
-            ];
-            for (var i = 0; i < tests.length; i++) {
+    if (!javaAvailable) {
+        fail('Java bridge unavailable');
+        finish();
+        return;
+    }
+
+    try {
+        Java.perform(function () {
+            try {
+                var classes = Java.enumerateLoadedClassesSync();
+                if (classes.length === 0) {
+                    fail('Java class enumeration returned no classes');
+                }
+
+                var requiredClasses = [
+                    'java.lang.String',
+                    'android.app.Activity',
+                    'javax.crypto.Cipher',
+                    'android.content.SharedPreferences',
+                    'java.net.URL'
+                ];
+                for (var classIndex = 0; classIndex < requiredClasses.length; classIndex++) {
+                    try {
+                        Java.use(requiredClasses[classIndex]);
+                    } catch (error) {
+                        fail('Java.use(' + requiredClasses[classIndex] + ') failed', error);
+                    }
+                }
+
                 try {
-                    Java.use(tests[i]);
-                    console.log('[JAVA] use(' + tests[i] + '): OK');
-                } catch(e) {
-                    console.log('[JAVA] use(' + tests[i] + '): FAIL - ' + e);
+                    var Activity = Java.use('android.app.Activity');
+                    var onCreate = Activity.onCreate.overload('android.os.Bundle');
+                    onCreate.implementation = function (bundle) {
+                        return onCreate.call(this, bundle);
+                    };
+                } catch (error) {
+                    fail('Activity.onCreate hook failed', error);
                 }
-            }
 
-            // Hook test
-            try {
-                var Activity = Java.use('android.app.Activity');
-                Activity.onCreate.overload('android.os.Bundle').implementation = function(b) {
-                    console.log('[HOOK] Activity.onCreate: ' + this.getClass().getName());
-                    this.onCreate(b);
-                };
-                console.log('[JAVA] hook Activity.onCreate: OK');
-            } catch(e) {
-                console.log('[JAVA] hook Activity.onCreate: FAIL - ' + e);
-            }
-
-            // Thread check from Java side
-            try {
-                var Thread = Java.use('java.lang.Thread');
-                var threadSet = Thread.getAllStackTraces();
-                var iter = threadSet.keySet().iterator();
-                var java_suspicious = [];
-                while (iter.hasNext()) {
-                    var t = iter.next();
-                    var name = t.getName();
-                    var lower = name.toLowerCase();
-                    if (lower.indexOf('frida') >= 0 || name === 'gmain' || name === 'gdbus' ||
-                        name === 'gum-js-loop' || name === 'pool-spawner') {
-                        java_suspicious.push(name);
+                try {
+                    var Thread = Java.use('java.lang.Thread');
+                    var threadSet = Thread.getAllStackTraces();
+                    var iterator = threadSet.keySet().iterator();
+                    while (iterator.hasNext()) {
+                        var javaThreadName = Java.cast(iterator.next(), Thread).getName();
+                        var loweredJavaThread = javaThreadName.toLowerCase();
+                        if (
+                            loweredJavaThread.indexOf('frida') >= 0 ||
+                            javaThreadName === 'gmain' ||
+                            javaThreadName === 'gdbus' ||
+                            javaThreadName === 'gum-js-loop' ||
+                            javaThreadName === 'pool-spawner'
+                        ) {
+                            fail('suspicious Java thread', javaThreadName);
+                        }
                     }
+                } catch (error) {
+                    fail('Java thread scan failed', error);
                 }
-                console.log('[ANTIDETECT] java threads: ' + (java_suspicious.length === 0 ? 'CLEAN' : 'DETECTED: ' + java_suspicious.join(', ')));
-            } catch(e) {
-                console.log('[ANTIDETECT] java threads: ERROR - ' + e);
-            }
 
-            // Maps check from Java
-            try {
-                var Runtime = Java.use('java.lang.Runtime');
-                var proc = Runtime.getRuntime().exec('cat /proc/self/maps');
-                var is = proc.getInputStream();
-                var buf = Java.array('byte', new Array(65536).fill(0));
-                var total = '';
-                var n;
-                while ((n = is.read(buf)) > 0) {
-                    for (var j = 0; j < n; j++) {
-                        total += String.fromCharCode(buf[j] & 0xFF);
+                try {
+                    var Runtime = Java.use('java.lang.Runtime');
+                    var process = Runtime.getRuntime().exec('cat /proc/self/maps');
+                    var input = process.getInputStream();
+                    var buffer = Java.array('byte', new Array(65536).fill(0));
+                    var javaMaps = '';
+                    var bytesRead;
+                    while ((bytesRead = input.read(buffer)) > 0) {
+                        for (var byteIndex = 0; byteIndex < bytesRead; byteIndex++) {
+                            javaMaps += String.fromCharCode(buffer[byteIndex] & 0xff);
+                        }
                     }
+                    input.close();
+                    if (javaMaps.toLowerCase().indexOf('frida') >= 0) {
+                        fail('Java maps scan contains frida');
+                    }
+                } catch (error) {
+                    fail('Java maps scan failed', error);
                 }
-                is.close();
-                var java_maps_clean = total.toLowerCase().indexOf('frida') === -1;
-                console.log('[ANTIDETECT] java maps: ' + (java_maps_clean ? 'CLEAN' : 'DETECTED'));
-            } catch(e) {
-                console.log('[ANTIDETECT] java maps: ERROR');
+            } catch (error) {
+                fail('Java acceptance callback failed', error);
             }
-
-            console.log('[TEST] ALL DONE');
+            finish();
         });
-    } else {
-        console.log('[JAVA] NOT AVAILABLE');
-        console.log('[TEST] ALL DONE');
+    } catch (error) {
+        fail('Java.perform failed', error);
+        finish();
     }
 }, 2000);

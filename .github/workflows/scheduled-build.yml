@@ -2,205 +2,179 @@ name: Weekly Stealth Build
 
 on:
   schedule:
-    # Every Sunday at 03:00 UTC
-    - cron: '0 3 * * 0'
+    - cron: "0 3 * * 0"
   workflow_dispatch:
     inputs:
       frida_version:
-        description: 'Frida version (empty = latest)'
+        description: Device-verified Frida version
         required: false
-        default: ''
+        type: string
+        default: "17.16.3"
       arch:
-        description: 'Target architecture(s)'
+        description: Target architecture(s)
         required: true
-        default: 'android-arm64'
         type: choice
+        default: android-arm64
         options:
           - android-arm64
           - android-arm
           - android-arm64,android-arm
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: weekly-stealth-build
+  cancel-in-progress: false
 
 jobs:
-  build:
+  resolve:
+    name: resolve inputs
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 10
+    env:
+      REQUESTED_ARCHITECTURES: ${{ inputs.arch || 'android-arm64' }}
+      REQUESTED_VERSION: ${{ inputs.frida_version || '17.16.3' }}
+    outputs:
+      arch: ${{ steps.resolve.outputs.arch }}
+      name: ${{ steps.resolve.outputs.name }}
+      port: ${{ steps.resolve.outputs.port }}
+      version: ${{ steps.resolve.outputs.version }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Check out resolver
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - name: Detect latest Frida version
-        id: version
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve and validate inputs
+        id: resolve
         run: |
-          if [ -n "${{ inputs.frida_version }}" ]; then
-            VERSION="${{ inputs.frida_version }}"
-          else
-            VERSION=$(curl -s https://api.github.com/repos/frida/frida/releases/latest | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          version=$(python3 -c \
+            'import build, sys; print(build.validate_version(sys.argv[1]))' \
+            "$REQUESTED_VERSION")
+          if [[ "$version" != "17.16.3" ]]; then
+            echo "Automatic releases are limited to device-verified Frida 17.16.3" >&2
+            exit 1
           fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Frida version: $VERSION"
+          arch=$(python3 -c \
+            'import build, sys; print(",".join(build.parse_architectures(sys.argv[1])))' \
+            "$REQUESTED_ARCHITECTURES")
+          read -r name port < <(python3 namegen.py --weekly --port --quiet)
+          python3 -c \
+            'import build, sys; build.validate_custom_name(sys.argv[1]); build.validate_port(int(sys.argv[2]))' \
+            "$name" "$port"
 
-      - name: Generate random name and port
-        id: random
-        run: |
-          NAME=$(python3 namegen.py --weekly --quiet)
-          PORT=$(python3 namegen.py --weekly --port-only --quiet)
-          echo "name=$NAME" >> $GITHUB_OUTPUT
-          echo "port=$PORT" >> $GITHUB_OUTPUT
-          echo "Build name: $NAME, port: $PORT"
-
-      - name: System info
-        run: |
-          echo "CPUs: $(nproc)"
-          echo "RAM: $(free -h | grep Mem | awk '{print $2}')"
-          echo "Disk: $(df -h / | tail -1 | awk '{print $4}') free"
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential curl git python3 unzip
-
-      - name: Cache NDK
-        uses: actions/cache@v4
-        id: ndk-cache
-        with:
-          path: build/android-ndk-r29
-          key: ndk-r29-linux
-
-      - name: Download NDK
-        if: steps.ndk-cache.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p build
-          curl -L -o build/android-ndk-r29-linux.zip \
-            https://dl.google.com/android/repository/android-ndk-r29-linux.zip
-          cd build && unzip -q android-ndk-r29-linux.zip && rm android-ndk-r29-linux.zip
-
-      - name: Cache Frida source
-        uses: actions/cache@v4
-        id: frida-cache
-        with:
-          path: build/frida
-          key: frida-${{ steps.version.outputs.version }}-source
-
-      - name: Clone Frida
-        if: steps.frida-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone --recurse-submodules --branch ${{ steps.version.outputs.version }} --depth 1 \
-            https://github.com/frida/frida.git build/frida
-
-      - name: Prepare fresh source from cache
-        if: steps.frida-cache.outputs.cache-hit == 'true'
-        run: |
-          cd build/frida
-          git checkout -- .
-          git submodule foreach --recursive 'git checkout -- . || true'
-          git clean -fdx || true
-          rm -rf build/
-
-      - name: Build
-        run: |
-          python3 build.py \
-            --version ${{ steps.version.outputs.version }} \
-            --name ${{ steps.random.outputs.name }} \
-            --arch ${{ inputs.arch || 'android-arm64' }} \
-            --port ${{ steps.random.outputs.port }} \
-            --extended \
-            --skip-clone \
-            --ndk-path build/android-ndk-r29 \
-            --verify
-
-      - name: Generate build info
-        run: |
-          cat > output/build-info.json <<EOF
           {
-            "name": "${{ steps.random.outputs.name }}",
-            "port": ${{ steps.random.outputs.port }},
-            "version": "${{ steps.version.outputs.version }}",
-            "arch": "${{ inputs.arch || 'android-arm64' }}",
-            "date": "$(date -u +%Y-%m-%d)"
-          }
-          EOF
+            printf 'version=%s\n' "$version"
+            printf 'arch=%s\n' "$arch"
+            printf 'name=%s\n' "$name"
+            printf 'port=%s\n' "$port"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: List artifacts
-        run: |
-          echo "=== Build: ${{ steps.random.outputs.name }} (port ${{ steps.random.outputs.port }}) ==="
-          ls -lh output/
-          echo ""
-          echo "=== Binary verification ==="
-          for f in output/*; do
-            if [[ ! "$f" == *.gz ]]; then
-              count=$(strings "$f" | grep -c "frida" || true)
-              echo "$f: $count residual 'frida' strings"
-            fi
-          done
+  build:
+    name: build verified artifacts
+    needs: resolve
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build.yml
+    with:
+      frida_version: ${{ needs.resolve.outputs.version }}
+      custom_name: ${{ needs.resolve.outputs.name }}
+      arch: ${{ needs.resolve.outputs.arch }}
+      port: ${{ needs.resolve.outputs.port }}
+      extended: true
+      temp_fixes: false
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+  release:
+    name: attest and release
+    needs:
+      - resolve
+      - build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      ARCHITECTURES: ${{ needs.resolve.outputs.arch }}
+      CUSTOM_NAME: ${{ needs.resolve.outputs.name }}
+      CUSTOM_PORT: ${{ needs.resolve.outputs.port }}
+      FRIDA_VERSION: ${{ needs.resolve.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Download verified build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: stealth-${{ steps.random.outputs.name }}-${{ steps.version.outputs.version }}
-          path: |
-            output/*.gz
-            output/build-info.json
-          retention-days: 30
+          name: phantom-frida-build
+          path: release-assets
 
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Verify downloaded release assets
         run: |
-          TAG="v${{ steps.version.outputs.version }}-$(date +%Y%m%d)"
-          TITLE="Stealth Build — ${{ steps.random.outputs.name }} (Frida ${{ steps.version.outputs.version }})"
-          cat > /tmp/release.md <<RELEASE_EOF
-          ## Stealth Frida Server
+          cd release-assets
+          sha256sum --check SHA256SUMS
+          python3 - "$FRIDA_VERSION" "$CUSTOM_NAME" "$CUSTOM_PORT" \
+            "$ARCHITECTURES" <<'PY'
+          import json
+          import sys
 
-          | Parameter | Value |
-          |-----------|-------|
-          | Frida version | ${{ steps.version.outputs.version }} |
-          | Custom name | \`${{ steps.random.outputs.name }}\` |
-          | Custom port | \`${{ steps.random.outputs.port }}\` |
-          | Architecture | \`${{ inputs.arch || 'android-arm64' }}\` |
-          | Extended patches | Yes (all 16 detection vectors) |
+          with open("build-info.json", encoding="utf-8") as stream:
+              info = json.load(stream)
 
-          ### Deploy
-          \`\`\`bash
-          # Extract
-          gunzip ${{ steps.random.outputs.name }}-server-*-android-arm64.gz
+          expected = {
+              "frida_version": sys.argv[1],
+              "name": sys.argv[2],
+              "port": int(sys.argv[3]),
+              "architectures": sys.argv[4].split(","),
+          }
+          actual = {key: info.get(key) for key in expected}
+          if actual != expected:
+              raise SystemExit(f"build metadata mismatch: {actual!r} != {expected!r}")
+          PY
 
-          # Push to device
-          adb push ${{ steps.random.outputs.name }}-server-*-android-arm64 /data/local/tmp/${{ steps.random.outputs.name }}-server
-          adb shell chmod 755 /data/local/tmp/${{ steps.random.outputs.name }}-server
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: release-assets/*
 
-          # Start
-          adb shell /data/local/tmp/${{ steps.random.outputs.name }}-server -D &
-          frida -H 127.0.0.1:${{ steps.random.outputs.port }} -f com.example.app
-          \`\`\`
-
-          ### Connect
-          Standard \`frida-tools\` (\`pip install frida-tools\`) connects normally — use \`-H 127.0.0.1:${{ steps.random.outputs.port }}\` instead of \`-U\`.
-          RELEASE_EOF
-
-          gh release create "$TAG" output/*.gz output/build-info.json \
-            --title "$TITLE" \
-            --notes-file /tmp/release.md \
-            --latest
-
-      - name: Build summary
+      - name: Create unique GitHub release
         run: |
-          echo "## Weekly Stealth Build" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Frida version | ${{ steps.version.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Custom name | ${{ steps.random.outputs.name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Custom port | ${{ steps.random.outputs.port }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Architecture | ${{ inputs.arch || 'android-arm64' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Deploy:" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "adb push ${{ steps.random.outputs.name }}-server /data/local/tmp/${{ steps.random.outputs.name }}-server" >> $GITHUB_STEP_SUMMARY
-          echo "adb shell chmod 755 /data/local/tmp/${{ steps.random.outputs.name }}-server" >> $GITHUB_STEP_SUMMARY
-          echo "adb shell /data/local/tmp/${{ steps.random.outputs.name }}-server &" >> $GITHUB_STEP_SUMMARY
-          echo "frida -H 127.0.0.1:${{ steps.random.outputs.port }} -f com.example.app" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          tag="v${FRIDA_VERSION}-$(date -u +%Y%m%d)-run${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          title="Stealth build - ${CUSTOM_NAME} (Frida ${FRIDA_VERSION})"
+          notes="$RUNNER_TEMP/release.md"
+
+          {
+            echo '## Verified custom Frida build'
+            echo
+            echo "- Frida version: ${FRIDA_VERSION}"
+            echo "- Custom name: ${CUSTOM_NAME}"
+            echo "- Custom port: ${CUSTOM_PORT}"
+            echo "- Architectures: ${ARCHITECTURES}"
+            echo "- Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "Verify the downloaded files with \`sha256sum --check SHA256SUMS\`."
+          } > "$notes"
+
+          gh release create "$tag" \
+            release-assets/* \
+            --title "$title" \
+            --notes-file "$notes"
+
+      - name: Write job summary
+        run: |
+          {
+            echo '## Weekly Stealth Build'
+            echo
+            echo "- Frida version: ${FRIDA_VERSION}"
+            echo "- Custom name: ${CUSTOM_NAME}"
+            echo "- Custom port: ${CUSTOM_PORT}"
+            echo "- Architectures: ${ARCHITECTURES}"
+          } >> "$GITHUB_STEP_SUMMARY"

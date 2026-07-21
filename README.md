@@ -1,169 +1,206 @@
 # phantom-frida
 
-Build anti-detection Frida server from source. Covers 16 detection vectors with ~90 patches.
+`phantom-frida` builds Android Frida Server and Gadget from source while
+changing a targeted set of observable runtime identifiers. It is a builder and
+verification harness, not a promise that every application-specific detection
+method is defeated.
 
-Extended beyond [ajeossida](https://github.com/hackcatml/ajeossida) with additional stealth techniques: custom port, binary string sweep, internal symbol renaming, temp path obfuscation, and more.
+The current compatibility target is **Frida 17.16.3** on Android. Other Frida
+versions are intentionally treated as unverified until their source contracts,
+full build, and rooted-device acceptance have been repeated.
 
-## How it works
+Use this project only on applications and devices you own or are authorized to
+test.
 
-Phantom-frida clones Frida source, applies patches in 4 phases (source, targeted, post-build, binary), and compiles a custom server where all identifiable "frida" strings, symbols, thread names, and file paths are replaced with a custom name.
+## What is verified
 
-Standard Frida client (`pip install frida-tools`) connects to the patched server normally — the client-server protocol is preserved.
+The repository separates three kinds of evidence:
 
-## Quick Start
+1. Unit and fixture tests validate input handling, exact Frida 17.16.3 source
+   patch contracts, DEX rebuilding, artifact promotion, metadata, workflows,
+   and failure behavior.
+2. `build.py --verify` requires both Server and Gadget, then rejects known
+   forbidden runtime markers before publishing either artifact.
+3. `scripts/android_smoke.py` exercises a built artifact on one rooted device:
+   stock-client enumeration, spawn, attach, Java bridge assertions, `/proc`
+   scans, and a separately loaded Gadget.
 
-### GitHub Actions (recommended)
+A passing source test or byte scan is not equivalent to runtime stealth. Claims
+about Android behavior should include the generated, redacted smoke-test report.
 
-1. Fork this repo
-2. Actions > **Build Custom Frida** > Run workflow
-3. Choose version, name, architecture, options
-4. Download artifacts (~8 min with cache, ~35 min cold build)
+## Build with GitHub Actions
 
-### Weekly auto-builds
+Run **Build Custom Frida** from the Actions tab. The reusable build workflow:
 
-The **Weekly Stealth Build** workflow runs every Sunday:
-- Detects latest Frida version automatically
-- Generates a random name and port via `namegen.py`
-- Builds with `--extended` for maximum stealth
-- Creates a GitHub Release with binary + `build-info.json`
+- validates every user-controlled build input;
+- downloads Android NDK r29 from Google and checks its published checksum;
+- clones a fresh upstream source tree instead of caching patched source;
+- uploads only after the hard artifact and marker gates pass;
+- includes `build-info.json` and `SHA256SUMS` in one build artifact.
 
-### Local build (WSL Ubuntu)
+The weekly workflow resolves the latest release through the authenticated
+GitHub API, calls the same read-only build workflow, verifies the downloaded
+artifact, attests it, and grants release write permission only to the final job.
 
-```bash
-python3 build.py --version 17.7.2
+## Local build
 
-# Full options:
-python3 build.py --version 17.7.2 --name myserver --port 27142 --extended --verify
+Requirements:
 
-# Patch only (inspect changes without compiling):
-python3 build.py --version 17.7.2 --skip-build
-```
+- Ubuntu 22.04 or newer (WSL is supported);
+- Python 3.10 or newer;
+- Git, curl, unzip, a C/C++ toolchain, JDK 17, and Node.js 18 or newer
+  (CI uses Node.js 24.13.1);
+- Android SDK platform and build-tools containing `android.jar` and D8;
+- about 20 GB of free disk space.
 
-### WSL helper script
-
-```bash
-wsl -d Ubuntu bash build-wsl.sh
-
-# With options:
-FRIDA_VERSION=17.7.2 CUSTOM_NAME=myserver CUSTOM_PORT=27142 EXTENDED=1 \
-  wsl -d Ubuntu bash build-wsl.sh
-```
-
-## Detection Vectors
-
-| # | Vector | Detection method | Base | Extended |
-|---|--------|-----------------|------|----------|
-| 1 | Process name `frida-server` | `/proc/*/cmdline`, `ps` | Renamed | Renamed |
-| 2 | `libfrida-agent.so` in maps | `/proc/self/maps` scan | Renamed | Renamed |
-| 3 | Thread names `gum-js-loop`, `gmain`, `gdbus` | `/proc/self/task/*/comm` | Renamed | Renamed |
-| 4 | memfd name `frida-agent-64.so` | `/proc/self/fd/` readlink | `jit-cache` | `jit-cache` |
-| 5 | `frida_agent_main` symbol | `dlsym` / memory scan | Renamed | Renamed |
-| 6 | SELinux labels `frida_file` | SELinux context check | Renamed | Renamed |
-| 7 | libc hooks (exit, signal) | Hook detection | Disabled | Disabled |
-| 8 | D-Bus service `re.frida.server` | D-Bus introspection | Renamed | Renamed |
-| 9 | Default port 27042 | `connect()` scan | - | `--port N` |
-| 10 | D-Bus interfaces | Protocol inspection | - | Renamed |
-| 11 | Internal C symbols | Memory string scan | - | Renamed |
-| 12 | GType names `FridaServer` | GObject introspection | - | Renamed |
-| 13 | Temp paths `.frida`, `frida-` | Filesystem scan | - | Renamed |
-| 14 | Binary string residuals | Binary `strings` scan | - | Swept |
-| 15 | Build config defines | Memory scan | - | Renamed |
-| 16 | Asset directory `libdir/frida` | Path inspection | - | Renamed |
-
-## Options
-
-```
---version, -v    Frida version to build (required)
---name, -n       Custom name replacing 'frida' (default: ajeossida; use random for stealth)
---arch, -a       Target arch (default: android-arm64)
---port, -p       Custom listening port (default: 27042)
---extended, -e   Enable extended anti-detection (vectors 9-16)
---temp-fixes     Stability fixes (perfetto skip, cloak detach)
---verify         Scan output for residual 'frida' strings
---skip-build     Apply patches only, don't compile
---skip-clone     Use existing source in work-dir
---ndk-path       Path to existing Android NDK r29
-```
-
-## Deploy
+If `--ndk-path` is omitted, the builder downloads Android NDK r29 under
+`build/`. A verified pinned-input arm64 build is:
 
 ```bash
-# Push to device
-adb push output/myserver-server-17.7.2-android-arm64 /data/local/tmp/myserver-server
-adb shell chmod 755 /data/local/tmp/myserver-server
-
-# Start (default port 27042)
-adb shell /data/local/tmp/myserver-server -D &
-frida -U -f com.example.app
-
-# Start (custom port)
-adb shell /data/local/tmp/myserver-server -D &
-adb forward tcp:27142 tcp:27142
-frida -H 127.0.0.1:27142 -f com.example.app
+export ANDROID_SDK_ROOT=/path/to/Android/Sdk
+python3 build.py \
+  --version 17.16.3 \
+  --name oemcodec \
+  --arch android-arm64 \
+  --port 27142 \
+  --extended \
+  --verify
 ```
 
-Each weekly release includes a `build-info.json` with the name, port, version, and architecture.
+Useful options:
 
-## Build Phases
-
-1. **Source patches**: Global string replacement across the entire Frida source tree. Renames all `frida-agent`, `frida-helper`, `frida-server`, `re.frida.*` references. Rebuilds Android helper DEX with renamed Java package.
-
-2. **Targeted patches**: Specific fixes for build system files (meson.build), memfd names, libc hook disabling, SELinux labels.
-
-3. **Post-build patches**: After first compilation, renames `frida_agent_main` symbol (generated by Vala compiler, only exists in build output). Requires a second incremental build.
-
-4. **Binary patches**: Hex-level replacements in compiled binaries — thread names (`gmain`, `gdbus`, `pool-spawner`), and optional binary string sweep for residual `frida`/`Frida` strings.
-
-## Architecture
-
-```
-build.py                Main build script (clone, patch, compile, collect)
-patches.py              All patch definitions (87 patches + 17 rollbacks)
-namegen.py              Random name/port generator for stealth builds
-build-wsl.sh            WSL helper script
-test_comprehensive.js   Anti-detection + Java bridge verification script
-.github/workflows/
-  build.yml             Manual build workflow
-  scheduled-build.yml   Weekly auto-build with releases
+```text
+--version, -v    Exact Frida semantic version (required)
+--name, -n       Lowercase replacement name, 3-20 characters
+--arch, -a       One or more supported Android architectures
+--port, -p       Listening port; omitted keeps 27042
+--extended, -e   Apply the optional extended identifier transformations
+--temp-fixes     Apply opt-in, device-specific stability changes
+--verify         Reject known forbidden markers in final artifacts
+--skip-build     Patch source without compiling
+--skip-clone     Use an existing source tree in the work directory
+--ndk-path       Use an existing Android NDK r29 directory
 ```
 
-## Requirements
+## Outputs and provenance
 
-- Ubuntu 22.04+ (WSL works)
-- Python 3.10+
-- Git, curl, unzip, make
-- ~20 GB free disk space
-- Android NDK r29 (auto-downloaded)
+For the example above, `output/` contains:
 
-## Version Support
+```text
+oemcodec-server-17.16.3-android-arm64
+oemcodec-server-17.16.3-android-arm64.gz
+oemcodec-gadget-17.16.3-android-arm64.so
+oemcodec-gadget-17.16.3-android-arm64.so.gz
+build-info.json
+SHA256SUMS
+```
 
-| Frida | Status |
-|-------|--------|
-| 17.x | Fully verified against source |
-| 16.x | Compatible (auto-detects API differences) |
+`build-info.json` records the exact builder, Frida, and frida-core commits, NDK
+version, UTC build time, architectures, name, port, and workflow URL when built
+in Actions. Verify downloaded binary files before use:
 
-## Tested Apps
+```bash
+cd output
+sha256sum --check SHA256SUMS
+python3 -m json.tool build-info.json >/dev/null
+```
 
-Verified on arm64 Android 14 device with `--extended`:
+Public weekly releases also receive a GitHub build-provenance attestation.
+`SHA256SUMS` identifies one output set; binary hashes are not expected to match
+across different build hosts.
 
-| App | Java bridge | Hooks | Anti-detection |
-|-----|-------------|-------|----------------|
-| Telegram | 28,772 classes | SSL+crypto | All clean |
-| Google Play Store | 47,305 classes | Activity hooks | All clean |
-| Facebook | 54,064 classes | Basic hooks | All clean |
-| Magisk | 27,737 classes | Activity hooks | All clean |
+## Stock-client compatibility
 
-## Known Limitations
+The builder preserves the D-Bus protocol interfaces under `re.frida.*`, the
+`/re/frida/GadgetSession` path, public capital `Frida` JavaScript API strings,
+and generated C ABI symbols required by stock clients. Renaming those values
+would break the normal Frida client/server contract.
 
-- **arm32 apps** (Chrome): Frida upstream bug [#2878](https://github.com/frida/frida/issues/2878) — `invalid instruction` in `_patchCode`. Not a phantom-frida issue.
-- **D-Bus interface names** (`re.frida.HostSession17` etc.): Intentionally NOT renamed in base mode. These are the client-server protocol — renaming server-side would break standard `frida` client. Not a detection vector (only visible over USB/TCP channel).
+The D-Bus service identifier, helper JNI package, zymbiote socket prefix,
+selected process/library/path identifiers, selected thread names, and an
+optional custom port are separate implementation details that the builder can
+transform. The output verifier rejects this explicit marker set:
 
-## Credits
+```text
+frida\0
+frida-zymbiote
+re/frida/HelperBackend
+frida-server
+frida-helper
+```
 
-- [Frida](https://frida.re/) by Ole Andre Ravnas
-- [ajeossida](https://github.com/hackcatml/ajeossida) by hackcatml — original stealth Frida concept
-- Detection vector research from the Android security community
+Capital `Frida` and allowlisted protocol strings are not verifier failures.
 
-## License
+## Rooted Android acceptance
 
-MIT
+Install the exact Python binding recorded in `build-info.json`, install the
+pinned Java bridge dependency, and connect exactly one rooted Android device:
+
+```bash
+python3 -m pip install "frida==17.16.3" frida-tools
+npm ci --ignore-scripts
+
+python3 scripts/android_smoke.py \
+  --server output/oemcodec-server-17.16.3-android-arm64 \
+  --gadget output/oemcodec-gadget-17.16.3-android-arm64.so \
+  --name oemcodec \
+  --port 27142 \
+  --package com.example.app \
+  --ndk build/android-ndk-r29 \
+  --report android-smoke-report.json
+```
+
+The package must be an installed Java application you are authorized to test.
+The harness compiles `test_comprehensive.js` with the explicit
+`frida-java-bridge` required by Frida 17, starts Server through a forwarded TCP
+port, then compiles a minimal native loader and exercises Gadget on a separate
+port. It cleans up its processes and forwards on exit.
+
+Frida Gadget configuration must be named next to the library as
+`lib<name>-gadget.config.so`; the harness generates and deploys this file.
+
+## Development checks
+
+```bash
+python -m pip install --requirement requirements-dev.txt
+npm ci --ignore-scripts
+python -m pytest
+ruff check .
+ruff format --check .
+mypy build.py patches.py namegen.py scripts
+node --check test_comprehensive.js
+bash -n build-wsl.sh
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full evidence requirements.
+
+## Repository layout
+
+```text
+build.py                 Clone, patch, compile, verify, and collect artifacts
+patches.py               Source and same-length binary transformations
+namegen.py               Seeded build-name and port generation
+scripts/android_smoke.py Rooted Android Server/Gadget acceptance harness
+test_comprehensive.js    Structured Frida 17 Java bridge assertions
+tests/                   Unit, contract, fixture, and workflow tests
+.github/workflows/       CI, CodeQL, reusable build, and release isolation
+```
+
+## Known boundaries
+
+- Only Frida 17.16.3 is the current verification target; support is not inferred
+  for all 17.x or 16.x releases.
+- `--temp-fixes` changes runtime behavior and remains opt-in.
+- Marker absence does not prove resistance to behavioral, integrity, timing, or
+  application-specific detection.
+- Frida 17 raw agents need explicit bridge imports or bundling. The harness uses
+  `frida.Compiler`; the Frida REPL and tracer provide their own bundled bridges.
+
+## Credits and licensing
+
+- [Frida](https://frida.re/) by Ole André Ravnas and contributors
+- [ajeossida](https://github.com/hackcatml/ajeossida) by hackcatml
+
+The builder code is MIT licensed. Generated binaries retain upstream licensing;
+see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

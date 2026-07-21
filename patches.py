@@ -1,7 +1,7 @@
 """
 Patch definitions for Custom Frida Builder.
 
-Verified against Frida 17.7.2 source code (February 2026).
+Compatibility target: Frida 17.16.3 source code.
 Extended beyond ajeossida with additional anti-detection techniques.
 
 Patch categories:
@@ -9,7 +9,7 @@ Patch categories:
   [E] Extended               — new techniques not in ajeossida
   [V] Version-specific       — differs between Frida 16.x and 17.x
 
-Source verification notes (17.7.2):
+Source verification notes (17.16.3):
   - g_set_prgname("frida") does NOT exist — removed
   - frida-gadget-tcp/unix do NOT exist — removed
   - memfd_create is in lib/base/linux.vala, NOT frida-helper-backend.vala
@@ -18,12 +18,97 @@ Source verification notes (17.7.2):
   - gumprocess-linux.c uses entry->name, NOT details.name
 """
 
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class RequiredFilePatch:
+    """A source contract whose absence must stop the build."""
+
+    relative_path: str
+    old: str
+    new: str
+    minimum: int = 1
+
+
+def get_required_file_patches(name: str) -> list[RequiredFilePatch]:
+    """Return exact Frida source patches required for Android runtime correctness."""
+    linux_host_session = "subprojects/frida-core/src/linux/linux-host-session.vala"
+    return [
+        RequiredFilePatch(
+            linux_host_session,
+            "re/frida/HelperBackend",
+            f"re/{name}/HelperBackend",
+        ),
+        RequiredFilePatch(
+            linux_host_session,
+            '"/frida-zymbiote-',
+            f'"/{name}-zymbiote-',
+            minimum=2,
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/src/linux/helpers/zymbiote.c",
+            '"/frida-zymbiote-',
+            f'"/{name}-zymbiote-',
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/base/session.vala",
+            "frida-server",
+            f"{name}-server",
+            minimum=2,
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/src/socket/socket-host-session.vala",
+            "frida-server",
+            f"{name}-server",
+            minimum=4,
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/payload/exit-monitor.vala",
+            (
+                """\t\tconstruct {
+\t\t\tvar interceptor = Gum.Interceptor.obtain ();
+
+\t\t\tunowned Gum.InvocationListener listener = this;
+
+#if WINDOWS
+\t\t\tinterceptor.attach ((void *) """
+                """Gum.Process.find_module_by_name (\"kernel32.dll\")."""
+                """find_export_by_name (\"ExitProcess\"),
+\t\t\t\tlistener);
+#else
+\t\t\tvar libc = Gum.Process.get_libc_module ();
+\t\t\tconst string[] apis = {
+\t\t\t\t\"exit\",
+\t\t\t\t\"_exit\",
+\t\t\t\t\"abort\",
+\t\t\t};
+\t\t\tforeach (var symbol in apis) {
+\t\t\t\tinterceptor.attach ((void *) libc.find_export_by_name (symbol), listener);
+\t\t\t}
+#endif
+\t\t}"""
+            ),
+            """\t\tconstruct {
+\t\t\t// Exit interception intentionally disabled.
+\t\t}""",
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-gum/gum/backend-posix/gumexceptor-posix.c",
+            """    gum_interceptor_replace (interceptor, gum_original_signal,
+        gum_exceptor_backend_replacement_signal, NULL, &options);
+    gum_interceptor_replace (interceptor, gum_original_sigaction,
+        gum_exceptor_backend_replacement_sigaction, NULL, &options);""",
+            "    (void) options; /* Signal interception intentionally disabled. */",
+        ),
+    ]
 
 
 # ============================================================================
 # [A] GLOBAL SOURCE PATCHES — recursive string replace across entire tree
 # ============================================================================
+
 
 def get_source_patches(name: str, cap_name: str) -> list[tuple[str, str]]:
     """
@@ -34,7 +119,6 @@ def get_source_patches(name: str, cap_name: str) -> list[tuple[str, str]]:
         # --- Agent library name (visible in /proc/pid/maps) ---
         ("libfrida-agent-raw.so", f"lib{name}-agent-raw.so"),
         ("libfrida-agent-modulated", f"lib{name}-agent-modulated"),
-
         # --- Android helper Java class (DEX embedded in server binary) ---
         # Must rename to prevent binary sweep from corrupting DEX, and to hide
         # the "re.frida.helper" process name which is a detection vector.
@@ -43,10 +127,8 @@ def get_source_patches(name: str, cap_name: str) -> list[tuple[str, str]]:
         ("re.frida.helper", f"re.{name}.helper"),
         ("re.frida.Gadget", f"re.{name}.Gadget"),
         ("package re.frida;", f"package re.{name};"),
-
         # --- D-Bus / service identifier ---
         ("re.frida.server", f"re.{name}.server"),
-
         # --- Helper binaries (spawned during injection) ---
         # More specific first, then bare form for compat system
         ("frida-helper-32", f"{name}-helper-32"),
@@ -54,7 +136,6 @@ def get_source_patches(name: str, cap_name: str) -> list[tuple[str, str]]:
         ("get_frida_helper_", f"get_{name}_helper_"),
         ("frida-helper", f"{name}-helper"),
         ('"/frida-"', f'"/{name}-"'),
-
         # --- Agent references (various quoting styles in Vala/C/Meson) ---
         # More specific first to avoid partial matches
         ('"agent" / "frida-agent.', f'"agent" / "{name}-agent.'),
@@ -64,13 +145,8 @@ def get_source_patches(name: str, cap_name: str) -> list[tuple[str, str]]:
         ("get_frida_agent_", f"get_{name}_agent_"),
         ("'FridaAgent'", f"'{cap_name}Agent'"),
         ('"FridaAgent"', f'"{cap_name}Agent"'),
-
         # --- JS engine thread name (visible in /proc/pid/task/tid/status) ---
         ('"gum-js-loop"', f'"{name}-js-loop"'),
-
-        # --- [E] Extended: internal Frida path references ---
-        ("'frida'", f"'{name}'"),  # Generic single-quoted 'frida'
-
         # --- [E] Extended: asset directory name ---
         ("/ 'frida'", f"/ '{name}'"),  # root_asset_dir = libdir / 'frida'
     ]
@@ -110,10 +186,11 @@ def get_rollback_patches(name: str) -> list[tuple[str, str]]:
 # [A] TARGETED FILE PATCHES — specific build system files
 # ============================================================================
 
+
 def get_targeted_patches(name: str, cap_name: str, target: str) -> list[tuple[str, str]]:
     """
     Patches for specific build system files.
-    Verified against Frida 17.7.2 meson.build files.
+    Verified against Frida 17.16.3 meson.build files.
     """
     if target == "server_meson":
         # subprojects/frida-core/server/meson.build
@@ -122,13 +199,13 @@ def get_targeted_patches(name: str, cap_name: str, target: str) -> list[tuple[st
             ("'frida-server'", f"'{name}-server'"),
             ('"frida-server"', f'"{name}-server"'),
             ("'frida-server-universal'", f"'{name}-server-universal'"),
-            # 17.7.2: server_name variable
+            # 17.16.3: server_name variable
             ("server_name = 'frida-server'", f"server_name = '{name}-server'"),
         ]
 
     elif target == "compat_build":
         # subprojects/frida-core/compat/build.py
-        # 17.7.2 uses constants: SERVER_TARGET, GADGET_TARGET, and Path references
+        # 17.16.3 uses constants: SERVER_TARGET, GADGET_TARGET, and Path references
         return [
             ('SERVER_TARGET = "frida-server"', f'SERVER_TARGET = "{name}-server"'),
             ('Path("server") / "frida-server"', f'Path("server") / "{name}-server"'),
@@ -137,13 +214,13 @@ def get_targeted_patches(name: str, cap_name: str, target: str) -> list[tuple[st
             ('"frida-gadget.dylib"', f'"{name}-gadget.dylib"'),
             ('"frida-gadget.so"', f'"{name}-gadget.so"'),
             # Cross-arch naming
-            (f'"frida-server-"', f'"{name}-server-"'),
-            (f'"frida-gadget-"', f'"{name}-gadget-"'),
+            ('"frida-server-"', f'"{name}-server-"'),
+            ('"frida-gadget-"', f'"{name}-gadget-"'),
         ]
 
     elif target == "core_meson":
         # subprojects/frida-core/meson.build
-        # 17.7.2: defines helper_name, agent_name, gadget_name
+        # 17.16.3: defines helper_name, agent_name, gadget_name
         return [
             ("helper_name = 'frida-helper'", f"helper_name = '{name}-helper'"),
             ("agent_name = 'frida-agent'", f"agent_name = '{name}-agent'"),
@@ -152,7 +229,7 @@ def get_targeted_patches(name: str, cap_name: str, target: str) -> list[tuple[st
             ("'FRIDA_AGENT_PATH'", f"'{name.upper()}_AGENT_PATH'"),
             # Asset directory
             ("get_option('libdir') / 'frida'", f"get_option('libdir') / '{name}'"),
-            # Gadget modulated (17.7.2 has this only in gadget meson)
+            # Gadget modulated (17.16.3 has this only in gadget meson)
             ('"frida-gadget"', f'"{name}-gadget"'),
             ("frida-gadget-modulated", f"{name}-gadget-modulated"),
             ("libfrida-gadget-modulated", f"lib{name}-gadget-modulated"),
@@ -160,7 +237,7 @@ def get_targeted_patches(name: str, cap_name: str, target: str) -> list[tuple[st
 
     elif target == "gadget_meson":
         # subprojects/frida-core/lib/gadget/meson.build
-        # Verified exact lines from 17.7.2
+        # Verified exact lines from 17.16.3
         # NOTE: do NOT rename vala_header — it's a build-time artifact,
         # and C glue files #include it by the original name
         return [
@@ -209,44 +286,14 @@ MEMFD_PATCHES = {
 
 
 # ============================================================================
-# [A] LIBC HOOK DISABLING — prevents detection via hooked libc functions
-# ============================================================================
-
-LIBC_HOOK_PATCHES = {
-    # exit-monitor.vala: disable interceptor.attach for exit/_exit/abort hooks
-    # Verified in 17.7.2: pattern still "interceptor.attach"
-    # Multiple occurrences (Windows ExitProcess + POSIX exit/_exit/abort)
-    "exit_monitor": [
-        ("interceptor.attach", "// interceptor.attach"),
-    ],
-
-    # gumexceptor-posix.c: disable signal/sigaction replacement
-    # Verified exact lines in 17.7.2:
-    #   gum_interceptor_replace (interceptor, gum_original_signal,
-    #       gum_exceptor_backend_replacement_signal, self, NULL);
-    #   gum_interceptor_replace (interceptor, gum_original_sigaction,
-    #       gum_exceptor_backend_replacement_sigaction, self, NULL);
-    "exceptor": [
-        ("gum_interceptor_replace (interceptor, gum_original_signal,",
-         "// gum_interceptor_replace (interceptor, gum_original_signal,"),
-        ("gum_exceptor_backend_replacement_signal, self, NULL);",
-         "// gum_exceptor_backend_replacement_signal, self, NULL);"),
-        ("gum_interceptor_replace (interceptor, gum_original_sigaction,",
-         "// gum_interceptor_replace (interceptor, gum_original_sigaction,"),
-        ("gum_exceptor_backend_replacement_sigaction, self, NULL);",
-         "// gum_exceptor_backend_replacement_sigaction, self, NULL);"),
-    ],
-}
-
-
-# ============================================================================
 # [A] SELINUX LABEL PATCHES
 # ============================================================================
+
 
 def SELINUX_PATCHES(name: str) -> list[tuple[str, str]]:
     """
     SELinux security context labels.
-    Verified in 17.7.2: located in src/linux/linjector.vala
+    Verified in 17.16.3: located in src/linux/linjector.vala
     Three occurrences: adjust_directory_permissions, adjust_file_permissions, adjust_fd_permissions
     """
     return [
@@ -263,6 +310,7 @@ def SELINUX_PATCHES(name: str) -> list[tuple[str, str]]:
 # [A] BINARY-LEVEL HEX PATCHES — post-compilation thread name changes
 # ============================================================================
 
+
 def get_binary_patches() -> list[tuple[str, str, str]]:
     """
     Hex-level byte replacements for compiled binaries.
@@ -272,20 +320,21 @@ def get_binary_patches() -> list[tuple[str, str, str]]:
     return [
         # gmain -> amain (GLib main loop thread)
         ("676d61696e00", "616d61696e00", "gmain\\0 -> amain\\0"),
-
         # gdbus -> gdbug (GDBus thread)
         ("676462757300", "676462756700", "gdbus\\0 -> gdbug\\0"),
-
         # pool-spawner -> pool-spoiler (GLib thread pool spawner)
-        ("706f6f6c2d737061776e657200",
-         "706f6f6c2d73706f696c657200",
-         "pool-spawner\\0 -> pool-spoiler\\0"),
+        (
+            "706f6f6c2d737061776e657200",
+            "706f6f6c2d73706f696c657200",
+            "pool-spawner\\0 -> pool-spoiler\\0",
+        ),
     ]
 
 
 # ============================================================================
 # [E] EXTENDED: DEFAULT PORT PATCH — change Frida's default port 27042
 # ============================================================================
+
 
 def get_port_patches(new_port: int = 27142) -> list[dict]:
     """
@@ -317,6 +366,7 @@ def get_port_patches(new_port: int = 27142) -> list[dict]:
 # [E] EXTENDED: BINARY STRING SWEEP — remove residual "frida" strings
 # ============================================================================
 
+
 def get_binary_string_patches(name: str) -> list[tuple[str, str, str]]:
     """
     Residual "frida" string sweep in compiled binaries.
@@ -330,8 +380,7 @@ def get_binary_string_patches(name: str) -> list[tuple[str, str, str]]:
     # "frida\0" (5 chars + null = 6 bytes) -> "libgc\0" (looks like GC lib reference)
     # Same length, won't corrupt binary
     return [
-        ("667269646100", "6c6962676300",
-         'residual "frida\\0" -> "libgc\\0"'),
+        ("667269646100", "6c6962676300", 'residual "frida\\0" -> "libgc\\0"'),
         # NOTE: "Frida\0" (capital F) is NOT patched here.
         # The JS runtime defines `Frida` as a global API object (Frida.version, etc.)
         # embedded in the compiled binary. Replacing "Frida\0" corrupts the JS engine
@@ -339,14 +388,14 @@ def get_binary_string_patches(name: str) -> list[tuple[str, str, str]]:
         # See: https://github.com/TheQmaks/phantom-frida/issues/1
         #
         # "FRIDA\0" -> "XBNDL\0"
-        ("465249444100", "58424e444c00",
-         'residual "FRIDA\\0" -> "XBNDL\\0"'),
+        ("465249444100", "58424e444c00", 'residual "FRIDA\\0" -> "XBNDL\\0"'),
     ]
 
 
 # ============================================================================
 # [E] EXTENDED: TEMP FILE PATH PATCHES — runtime file paths
 # ============================================================================
+
 
 def get_temp_path_patches(name: str) -> list[tuple[str, str]]:
     """
@@ -363,31 +412,9 @@ def get_temp_path_patches(name: str) -> list[tuple[str, str]]:
 
 
 # ============================================================================
-# [E] EXTENDED: TRANSPORT/PROTOCOL PATCHES
-# ============================================================================
-
-def get_transport_patches(name: str) -> list[tuple[str, str]]:
-    """
-    Patch transport-layer identifiers that can be fingerprinted.
-    These appear in D-Bus messages, auth tokens, and IPC.
-    """
-    return [
-        # D-Bus interface names
-        ('"re.frida.HostSession"', f'"re.{name}.HostSession"'),
-        ('"re.frida.AgentSession"', f'"re.{name}.AgentSession"'),
-        ('"re.frida.AgentController"', f'"re.{name}.AgentController"'),
-        ('"re.frida.TransportBroker"', f'"re.{name}.TransportBroker"'),
-        ('"re.frida.PortalSession"', f'"re.{name}.PortalSession"'),
-        ('"re.frida.BusSession"', f'"re.{name}.BusSession"'),
-        ('"re.frida.AuthenticationService"', f'"re.{name}.AuthenticationService"'),
-        # Generic re.frida.* catch-all (after specific ones)
-        ('"re.frida.', f'"re.{name}.'),
-    ]
-
-
-# ============================================================================
 # [E] EXTENDED: INTERNAL IDENTIFIER PATCHES
 # ============================================================================
+
 
 def get_internal_patches(name: str, cap_name: str) -> list[tuple[str, str]]:
     """
@@ -401,7 +428,7 @@ def get_internal_patches(name: str, cap_name: str) -> list[tuple[str, str]]:
     The binary string sweep (--extended) handles any residual 'frida' in the final binary.
     """
     return [
-        # GType names (visible via GObject introspection) — these are string literals, safe to rename
+        # GType names visible through GObject introspection; these literals are safe to rename.
         ("FridaServer", f"{cap_name}Server"),
         ("FridaGadget", f"{cap_name}Gadget"),
         ("FridaPortal", f"{cap_name}Portal"),
@@ -413,6 +440,7 @@ def get_internal_patches(name: str, cap_name: str) -> list[tuple[str, str]]:
 # [E] EXTENDED: STABILITY / CRASH FIXES
 # ============================================================================
 
+
 def get_stability_patches_17(frida_dir: Path) -> list[dict]:
     """
     Optional stability fixes for Frida 17.x.
@@ -420,43 +448,44 @@ def get_stability_patches_17(frida_dir: Path) -> list[dict]:
     """
     return [
         {
-            "description": "Skip perfetto_hprof_ thread during enumeration (prevents SEGV on some devices)",
+            "description": (
+                "Skip perfetto_hprof_ thread during enumeration (prevents SEGV on some devices)"
+            ),
             "file": "subprojects/frida-gum/gum/backend-linux/gumprocess-linux.c",
-            # Verified 17.7.2: variable is entry->name, NOT details.name
+            # Verified 17.16.3: variable is entry->name, NOT details.name
             "old": "    carry_on = func (entry, user_data);",
             "new": (
                 '    if (entry->name != NULL && strcmp (entry->name, "perfetto_hprof_") == 0)\n'
-                '        goto skip;\n'
-                '    carry_on = func (entry, user_data);'
+                "        goto skip;\n"
+                "    carry_on = func (entry, user_data);"
             ),
         },
     ]
 
 
 # ============================================================================
-# SUMMARY — all detection vectors covered
+# SUMMARY - transformations and verification boundaries
 # ============================================================================
 
 DETECTION_VECTORS = """
-Detection vectors addressed:
+Build transformations:
 
-[A] Ajeossida-compatible (proven):
- 1. Binary/process name:     frida-server, frida-helper -- renamed
- 2. Library in /proc/maps:   libfrida-agent-raw.so -- renamed
- 3. Thread names in /proc:   gum-js-loop, gmain, gdbus, pool-spawner -- renamed
- 4. memfd in /proc/fd:       memfd:frida-agent-64.so -- memfd:jit-cache
- 5. Symbol in memory:        frida_agent_main -- renamed (two-pass build)
- 6. SELinux context:         frida_file, frida_memfd -- renamed
- 7. libc function hooks:     exit monitor + signal/sigaction interceptors disabled
- 8. D-Bus service name:      re.frida.server -- renamed
+[required source and artifact contracts]
+ - Server, helper, Gadget, agent, JNI package, and zymbiote socket identifiers
+ - Selected thread and memfd names, SELinux labels, and D-Bus service identifier
+ - frida_agent_main generated symbol, patched in both caller and definition
 
-[E] Extended (new, use --extended):
- 9. Default port:            27042 -- configurable (apps scan this port)
-10. D-Bus interfaces:        re.frida.HostSession etc. -- renamed
-11. Internal C symbols:      frida_init, frida_version -- renamed
-12. GType names:             FridaServer, FridaGadget -- renamed
-13. Temp file paths:         .frida, frida- prefixes -- renamed
-14. Binary string residuals: Post-compilation sweep for frida/Frida/FRIDA
-15. Build config defines:    FRIDA_HELPER_PATH, FRIDA_AGENT_PATH -- renamed
-16. Asset directory:         libdir/frida -- libdir/custom
+[optional with --extended]
+ - Configured listening port, selected GType names, and temporary path prefixes
+ - Same-length residual byte replacements outside protected DEX regions
+
+[hard output gate]
+ - Rejects the explicit FORBIDDEN_BINARY_MARKERS set in Server and Gadget
+
+Compatibility identifiers intentionally preserved:
+ - D-Bus protocol interfaces under re.frida.* and /re/frida/GadgetSession
+ - Public capital Frida API names and generated C ABI symbols required by stock clients
+ - Allowlisted protocol strings; verification does not claim every substring is removed
+
+Runtime compatibility and observation claims require scripts/android_smoke.py evidence.
 """

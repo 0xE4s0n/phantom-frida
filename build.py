@@ -29,6 +29,7 @@ import struct
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from patches import (
     DETECTION_VECTORS,
@@ -54,6 +55,17 @@ NDK_URL = f"https://dl.google.com/android/repository/android-ndk-{NDK_VERSION}-l
 ALL_ARCHS = ["android-arm64", "android-arm", "android-x86_64", "android-x86"]
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 NAME_PATTERN = re.compile(r"^[a-z][a-z0-9]{2,31}$")
+ANDROID_FALLBACK_ROOTS = (
+    Path("/usr/local/lib/android/sdk"),
+    Path("/usr/local/lib/android"),
+)
+FORBIDDEN_BINARY_MARKERS = (
+    b"frida\x00",
+    b"frida-zymbiote",
+    b"re/frida/HelperBackend",
+    b"frida-server",
+    b"frida-helper",
+)
 
 
 class BuildError(RuntimeError):
@@ -145,6 +157,72 @@ def parse_architectures(value: str) -> list[str]:
             f"Unknown architecture: {shown}. Valid: {', '.join(ALL_ARCHS)}"
         )
     return architectures
+
+
+def require_executable(name: str) -> str:
+    """Resolve a mandatory executable or fail with its name."""
+    path = shutil.which(name)
+    if path is None:
+        raise BuildError(f"Required executable is missing: {name}")
+    return path
+
+
+def _android_sdk_roots() -> tuple[Path, ...]:
+    roots: list[Path] = []
+    for variable in ("ANDROID_SDK_ROOT", "ANDROID_HOME"):
+        value = os.environ.get(variable)
+        if value:
+            roots.append(Path(value))
+    roots.extend(ANDROID_FALLBACK_ROOTS)
+    return tuple(dict.fromkeys(roots))
+
+
+def find_android_jar() -> Path:
+    """Find the newest available Android platform API JAR."""
+    candidates = {
+        candidate
+        for root in _android_sdk_roots()
+        if root.exists()
+        for candidate in root.rglob("android.jar")
+        if candidate.is_file()
+    }
+    if not candidates:
+        raise BuildError("Required Android SDK platform file is missing: android.jar")
+    return sorted(candidates, key=os.fspath, reverse=True)[0]
+
+
+def find_d8_command() -> list[str]:
+    """Resolve D8 as an executable or its JAR entry point."""
+    executable = shutil.which("d8")
+    if executable is not None:
+        return [executable]
+
+    roots = [root for root in _android_sdk_roots() if root.exists()]
+    executables = {
+        candidate
+        for root in roots
+        for candidate in root.rglob("d8")
+        if candidate.is_file() and os.access(candidate, os.X_OK)
+    }
+    if executables:
+        return [os.fspath(sorted(executables, key=os.fspath, reverse=True)[0])]
+
+    jars = {
+        candidate
+        for root in roots
+        for candidate in root.rglob("d8.jar")
+        if candidate.is_file()
+    }
+    if jars:
+        d8_jar = sorted(jars, key=os.fspath, reverse=True)[0]
+        return [
+            require_executable("java"),
+            "-cp",
+            os.fspath(d8_jar),
+            "com.android.tools.r8.D8",
+        ]
+
+    raise BuildError("Required Android build tool is missing: d8")
 
 
 def detect_frida_major(version: str) -> int:
@@ -276,7 +354,7 @@ def rename_frida_files(frida_dir: Path, custom_name: str):
     skip_names = {"frida_version.py", "frida-version.py"}
     renamed_count = 0
 
-    for dirpath, dirnames, filenames in os.walk(frida_dir, topdown=False):
+    for dirpath, dirnames, filenames in os.walk(frida_dir, topdown=True):
         dirnames[:] = [d for d in dirnames if d not in skip_dirs]
         for fname in filenames:
             if fname in skip_names:
@@ -299,7 +377,17 @@ def rename_frida_files(frida_dir: Path, custom_name: str):
         log(f"  Renamed {renamed_count} files on disk", "OK")
 
 
-def rebuild_helper_dex(frida_dir: Path, custom_name: str):
+def _require_success(
+    tool: str, result: subprocess.CompletedProcess[str]
+) -> None:
+    if result.returncode == 0:
+        return
+    details = (result.stderr or result.stdout or "").strip()
+    suffix = f": {details}" if details else ""
+    raise BuildError(f"{tool} failed with exit code {result.returncode}{suffix}")
+
+
+def rebuild_helper_dex(frida_dir: Path, custom_name: str) -> Path:
     """Rebuild the Android helper DEX with renamed Java package.
 
     The pre-compiled helper.dex in the repo contains 're.frida.Helper'.
@@ -316,18 +404,18 @@ def rebuild_helper_dex(frida_dir: Path, custom_name: str):
         # Package might already be renamed (e.g., from cache)
         java_file = new_pkg_dir / "Helper.java"
         if not java_file.exists():
-            log("  Helper.java not found, skipping DEX rebuild", "WARN")
-            return
+            raise BuildError(f"Required Android helper source is missing: {java_file}")
 
     # Rename directory: re/frida/ -> re/{name}/
-    if old_pkg_dir.exists() and not new_pkg_dir.exists():
+    if old_pkg_dir.exists() and new_pkg_dir.exists():
+        raise BuildError(f"Both helper package directories exist: {old_pkg_dir}, {new_pkg_dir}")
+    if old_pkg_dir.exists():
         old_pkg_dir.rename(new_pkg_dir)
         log(f"  Renamed {old_pkg_dir.name}/ -> {new_pkg_dir.name}/", "OK")
 
     java_file = new_pkg_dir / "Helper.java"
     if not java_file.exists():
-        log("  Helper.java not found after rename", "WARN")
-        return
+        raise BuildError(f"Required Android helper source is missing after rename: {java_file}")
 
     # The Java source was already patched by replace_in_tree:
     #   "package re.frida;" -> "package re.{name};"
@@ -335,151 +423,83 @@ def rebuild_helper_dex(frida_dir: Path, custom_name: str):
     # Verify:
     content = java_file.read_text(encoding="utf-8")
     if f"package re.{custom_name};" not in content:
-        log("  Helper.java package not patched, fixing...", "WARN")
         content = content.replace("package re.frida;", f"package re.{custom_name};")
+        if f"package re.{custom_name};" not in content:
+            raise BuildError(f"Could not patch Android helper package in {java_file}")
         java_file.write_text(content, encoding="utf-8")
 
-    # Try to recompile the DEX
     dex_file = helper_dir / "helper.dex"
-    build_dir = helper_dir / "build"
-    build_dir.mkdir(exist_ok=True)
-    java_build = build_dir / "java"
-    java_build.mkdir(exist_ok=True)
+    if not dex_file.is_file():
+        raise BuildError(f"Required precompiled Android helper DEX is missing: {dex_file}")
 
-    # Check if javac is available
-    javac_path = shutil.which("javac")
-    if javac_path is None:
-        log("  javac not available, keeping pre-compiled DEX (may contain 'frida' strings)", "WARN")
-        return
-
-    # We need android.jar for compilation. Check common locations.
-    android_jar = None
-    possible_jars = [
-        # GitHub Actions / CI
-        Path("/usr/local/lib/android/sdk/platforms/android-34/android.jar"),
-        Path("/usr/local/lib/android/sdk/platforms/android-33/android.jar"),
-        # Try any available platform
-    ]
-    # Also search in ANDROID_SDK_ROOT if set
-    sdk_root = os.environ.get("ANDROID_SDK_ROOT", os.environ.get("ANDROID_HOME", ""))
-    if sdk_root:
-        platforms_dir = Path(sdk_root) / "platforms"
-        if platforms_dir.exists():
-            for p in sorted(platforms_dir.iterdir(), reverse=True):
-                jar = p / "android.jar"
-                if jar.exists():
-                    possible_jars.insert(0, jar)
-
-    for jar in possible_jars:
-        if jar.exists():
-            android_jar = jar
-            break
-
-    if android_jar is None:
-        android_root = Path("/usr/local/lib/android")
-        if android_root.exists():
-            android_jar = next(iter(sorted(android_root.rglob("android.jar"), reverse=True)), None)
-
-    if android_jar is None:
-        log("  android.jar not found, keeping pre-compiled DEX", "WARN")
-        return
+    javac_path = require_executable("javac")
+    jar_path = require_executable("jar")
+    android_jar = find_android_jar()
+    d8_command = find_d8_command()
 
     log(f"  Recompiling helper DEX (android.jar: {android_jar.name})...", "STEP")
+    with TemporaryDirectory(dir=helper_dir, prefix=".dex-build-") as temporary:
+        build_dir = Path(temporary)
+        java_build = build_dir / "java"
+        dex_build = build_dir / "dex"
+        java_build.mkdir()
+        dex_build.mkdir()
 
-    # Step 1: javac -> .class files
-    result = run(
-        [
-            javac_path,
-            "-cp",
-            f".{os.pathsep}{android_jar}",
-            "-bootclasspath",
-            android_jar,
-            "-source",
-            "1.8",
-            "-target",
-            "1.8",
-            "-Xlint:-options",
-            java_file,
-            "-d",
-            java_build,
-        ],
-        cwd=helper_dir,
-        check=False,
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        log(f"  javac failed: {result.stderr[:200]}", "WARN")
-        log("  Keeping pre-compiled DEX", "WARN")
-        return
-
-    # Collect ALL .class files (including inner classes like Helper$1.class)
-    class_dir = java_build / "re" / custom_name
-    class_files = list(class_dir.glob("*.class"))
-    if not class_files:
-        log("  No .class files generated", "WARN")
-        return
-    log(f"  Compiled {len(class_files)} class files (including inner classes)", "OK")
-
-    # Step 2: Package into JAR first (avoids d8 "defined multiple times" error)
-    jar_file = build_dir / f"{custom_name}-helper.jar"
-    jar_path = shutil.which("jar")
-    if jar_path is None:
-        log("  jar not found, keeping pre-compiled DEX", "WARN")
-        return
-    result = run(
-        [jar_path, "cfe", jar_file, f"re.{custom_name}.Helper", "-C", java_build, "."],
-        cwd=helper_dir,
-        check=False,
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        log(f"  jar failed: {result.stderr[:200]}", "WARN")
-        return
-
-    # Step 3: Convert JAR to DEX using d8
-    d8_path = shutil.which("d8")
-    if d8_path is None:
-        # Try d8 from Android SDK build-tools
-        if sdk_root:
-            bt_dir = Path(sdk_root) / "build-tools"
-            if bt_dir.exists():
-                for bt in sorted(bt_dir.iterdir(), reverse=True):
-                    candidate = bt / "d8"
-                    if candidate.exists():
-                        d8_path = str(candidate)
-                        break
-        if d8_path is None:
-            android_root = Path("/usr/local/lib/android")
-            if android_root.exists():
-                found_d8 = next(iter(sorted(android_root.rglob("d8"), reverse=True)), None)
-                if found_d8 is not None:
-                    d8_path = str(found_d8)
-
-    if d8_path is None:
-        log("  d8 not found, keeping pre-compiled DEX", "WARN")
-        return
-    result = run(
-        [d8_path, "--lib", android_jar, "--output", build_dir, jar_file],
-        cwd=helper_dir,
-        check=False,
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        log(f"  d8 failed: {result.stderr[:200]}", "WARN")
-        log("  Keeping pre-compiled DEX", "WARN")
-        return
-
-    # Step 3: Replace helper.dex with new one
-    new_dex = build_dir / "classes.dex"
-    if new_dex.exists():
-        shutil.copy2(new_dex, dex_file)
-        log(
-            f"  Helper DEX rebuilt: {dex_file.stat().st_size} bytes "
-            f"(package: re.{custom_name})",
-            "OK",
+        javac_result = run(
+            [
+                javac_path,
+                "-cp",
+                f".{os.pathsep}{android_jar}",
+                "-bootclasspath",
+                android_jar,
+                "-source",
+                "1.8",
+                "-target",
+                "1.8",
+                "-Xlint:-options",
+                java_file,
+                "-d",
+                java_build,
+            ],
+            cwd=helper_dir,
+            check=False,
+            capture_output=True,
         )
-    else:
-        log("  classes.dex not generated, keeping pre-compiled DEX", "WARN")
+        _require_success("javac", javac_result)
+
+        class_files = list((java_build / "re" / custom_name).glob("*.class"))
+        if not class_files:
+            raise BuildError(f"javac generated no helper classes under re/{custom_name}")
+        log(f"  Compiled {len(class_files)} helper class files", "OK")
+
+        jar_file = build_dir / f"{custom_name}-helper.jar"
+        jar_result = run(
+            [jar_path, "cfe", jar_file, f"re.{custom_name}.Helper", "-C", java_build, "."],
+            cwd=helper_dir,
+            check=False,
+            capture_output=True,
+        )
+        _require_success("jar", jar_result)
+
+        d8_result = run(
+            [*d8_command, "--lib", android_jar, "--output", dex_build, jar_file],
+            cwd=helper_dir,
+            check=False,
+            capture_output=True,
+        )
+        _require_success("d8", d8_result)
+
+        new_dex = dex_build / "classes.dex"
+        if not new_dex.is_file():
+            raise BuildError(f"d8 did not generate expected output: {new_dex}")
+        shutil.copy2(new_dex, dex_file)
+
+    log(
+        f"  Helper DEX rebuilt: {dex_file.stat().st_size} bytes "
+        f"(package: re.{custom_name})",
+        "OK",
+    )
+    return dex_file
 
 
 def apply_required_file_patches(frida_dir: Path, custom_name: str) -> None:
@@ -600,16 +620,9 @@ def apply_targeted_patches(frida_dir: Path, custom_name: str, frida_major: int):
     log("Targeted patches complete", "OK")
 
 
-def apply_extended_patches(frida_dir: Path, custom_name: str, port: int | None):
-    """Apply extended anti-detection patches beyond ajeossida."""
-    log("=" * 60, "HEADER")
-    log("PHASE 2.5: Extended anti-detection patches", "STEP")
-    log("=" * 60, "HEADER")
-
-    cap_name = custom_name[0].upper() + custom_name[1:]
-
-    # --- Port change ---
-    if port and port != 27042:
+def apply_port_patches(frida_dir: Path, port: int | None) -> None:
+    """Apply only the configured listening-port replacement."""
+    if port is not None and port != 27042:
         port_patches = get_port_patches(port)
         for patch in port_patches:
             for fpath in patch["files"]:
@@ -622,6 +635,17 @@ def apply_extended_patches(frida_dir: Path, custom_name: str, port: int | None):
         count = replace_in_tree(frida_dir / "subprojects" / "frida-core", "27042", str(port))
         if count:
             log(f"  Port: global sweep found {count} more occurrences", "OK")
+
+
+def apply_extended_patches(frida_dir: Path, custom_name: str, port: int | None):
+    """Apply extended anti-detection patches beyond ajeossida."""
+    log("=" * 60, "HEADER")
+    log("PHASE 2.5: Extended anti-detection patches", "STEP")
+    log("=" * 60, "HEADER")
+
+    cap_name = custom_name[0].upper() + custom_name[1:]
+
+    apply_port_patches(frida_dir, port)
 
     # --- D-Bus interface names ---
     # NOTE: Transport/D-Bus interface renames (re.frida.HostSession etc.) are DISABLED.
@@ -816,9 +840,15 @@ def build_frida(frida_dir: Path, ndk_path: Path):
 # Collect artifacts
 # ============================================================================
 
-def collect_artifacts(frida_dir: Path, arch: str, custom_name: str,
-                      version: str, output_dir: Path, extended: bool):
-    """Find, binary-patch, and package build artifacts."""
+def collect_artifacts(
+    frida_dir: Path,
+    arch: str,
+    custom_name: str,
+    version: str,
+    output_dir: Path,
+    extended: bool,
+) -> list[Path]:
+    """Stage, verify, and promote mandatory build artifacts."""
     log(f"Collecting artifacts for {arch}...", "STEP")
 
     arch_short = arch.replace("android-", "")
@@ -827,7 +857,7 @@ def collect_artifacts(frida_dir: Path, arch: str, custom_name: str,
         base = frida_dir / "build" / "subprojects" / "frida-core" / subdir
         for pattern in patterns:
             candidate = base / pattern
-            if candidate.exists():
+            if candidate.is_file():
                 return candidate
         # List directory for debugging
         if base.exists():
@@ -837,92 +867,123 @@ def collect_artifacts(frida_dir: Path, arch: str, custom_name: str,
                     log(f"      {f.name} ({f.stat().st_size:,} bytes)", "INFO")
         return None
 
-    def save_artifact(src: Path, out_name: str):
-        # Save compressed
-        out_gz = output_dir / f"{out_name}.gz"
-        with open(src, "rb") as f_in:
-            with gzip.open(out_gz, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out)
-        log(f"    -> {out_gz.name} ({out_gz.stat().st_size / 1024 / 1024:.1f} MB)", "OK")
-
-        # Save uncompressed
-        out_bin = output_dir / out_name
+    def save_artifact(src: Path, out_name: str, stage_dir: Path) -> list[Path]:
+        out_bin = stage_dir / out_name
         shutil.copy2(src, out_bin)
         os.chmod(out_bin, 0o755)
 
-    # --- Server ---
-    server = find_artifact("server", [
-        f"{custom_name}-server",
-        f"{custom_name}-server-raw",
-        "frida-server",
-        "frida-server-raw",
-    ])
-    if server:
-        log(f"  Server: {server.name}", "OK")
-        apply_binary_patches(server, custom_name, extended)
-        save_artifact(server, f"{custom_name}-server-{version}-android-{arch_short}")
-    else:
-        log("  Server: NOT FOUND", "ERROR")
+        out_gz = stage_dir / f"{out_name}.gz"
+        with out_bin.open("rb") as source, out_gz.open("wb") as raw_output:
+            with gzip.GzipFile(
+                filename=out_bin.name,
+                mode="wb",
+                fileobj=raw_output,
+                mtime=0,
+            ) as compressed:
+                shutil.copyfileobj(source, compressed)
+        log(
+            f"    -> {out_gz.name} ({out_gz.stat().st_size / 1024 / 1024:.1f} MB)",
+            "OK",
+        )
+        return [out_bin, out_gz]
 
-    # --- Agent .so ---
-    agent = find_artifact("lib/agent", [
-        f"lib{custom_name}-agent.so",
-        f"lib{custom_name}-agent-modulated.so",
-        f"lib{custom_name}-agent-raw.so",
-        "libfrida-agent.so",
-        "libfrida-agent-modulated.so",
-    ])
-    if agent:
+    server = find_artifact(
+        "server",
+        [
+            f"{custom_name}-server",
+            f"{custom_name}-server-raw",
+            "frida-server",
+            "frida-server-raw",
+        ],
+    )
+    if server is None:
+        raise BuildError(f"Server artifact not found for {arch}")
+
+    gadget = find_artifact(
+        "lib/gadget",
+        [
+            f"lib{custom_name}-gadget.so",
+            f"lib{custom_name}-gadget-modulated.so",
+            "libfrida-gadget.so",
+            "libfrida-gadget-modulated.so",
+        ],
+    )
+    if gadget is None:
+        raise BuildError(f"Gadget artifact not found for {arch}")
+
+    agent = find_artifact(
+        "lib/agent",
+        [
+            f"lib{custom_name}-agent.so",
+            f"lib{custom_name}-agent-modulated.so",
+            f"lib{custom_name}-agent-raw.so",
+            "libfrida-agent.so",
+            "libfrida-agent-modulated.so",
+        ],
+    )
+
+    log(f"  Server: {server.name}", "OK")
+    log(f"  Gadget: {gadget.name}", "OK")
+    apply_binary_patches(server, custom_name, extended)
+    apply_binary_patches(gadget, custom_name, extended)
+    if agent is not None:
         log(f"  Agent: {agent.name}", "OK")
         apply_binary_patches(agent, custom_name, extended)
 
-    # --- Gadget .so ---
-    gadget = find_artifact("lib/gadget", [
-        f"lib{custom_name}-gadget.so",
-        f"lib{custom_name}-gadget-modulated.so",
-        "libfrida-gadget.so",
-        "libfrida-gadget-modulated.so",
-    ])
-    if gadget:
-        log(f"  Gadget: {gadget.name}", "OK")
-        apply_binary_patches(gadget, custom_name, extended)
-        save_artifact(gadget, f"{custom_name}-gadget-{version}-android-{arch_short}.so")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    promoted: list[Path] = []
+    with TemporaryDirectory(dir=output_dir, prefix=".staging-") as temporary:
+        stage_dir = Path(temporary)
+        staged = [
+            *save_artifact(
+                server,
+                f"{custom_name}-server-{version}-android-{arch_short}",
+                stage_dir,
+            ),
+            *save_artifact(
+                gadget,
+                f"{custom_name}-gadget-{version}-android-{arch_short}.so",
+                stage_dir,
+            ),
+        ]
+
+        for artifact in staged:
+            if artifact.suffix != ".gz":
+                verify_binary(artifact)
+
+        for artifact in sorted(staged, key=lambda path: path.name):
+            destination = output_dir / artifact.name
+            os.replace(artifact, destination)
+            promoted.append(destination)
+
+    return promoted
 
 
 # ============================================================================
 # Verification
 # ============================================================================
 
-def verify_binary(binary_path: Path):
-    """Check compiled binary for residual 'frida' strings."""
-    if not binary_path.exists():
-        return
-
+def scan_forbidden_markers(binary_path: Path) -> dict[str, int]:
+    """Count runtime markers that indicate an invalid output artifact."""
+    if not binary_path.is_file():
+        raise BuildError(f"Binary artifact is missing: {binary_path}")
     data = binary_path.read_bytes()
-    # Search for null-terminated "frida" (case-sensitive)
-    frida_bytes = b"frida\x00"
-    count = data.count(frida_bytes)
-    if count:
-        log(f"  WARNING: {binary_path.name} still contains 'frida\\0' x{count}", "WARN")
+    return {
+        marker.decode("ascii", errors="backslashreplace"): data.count(marker)
+        for marker in FORBIDDEN_BINARY_MARKERS
+        if marker in data
+    }
 
-        # Show context around each occurrence
-        idx = 0
-        shown = 0
-        while shown < 5:
-            pos = data.find(frida_bytes, idx)
-            if pos == -1:
-                break
-            # Extract surrounding context
-            start = max(0, pos - 20)
-            end = min(len(data), pos + 30)
-            context = data[start:end]
-            # Show printable chars only
-            printable = "".join(chr(b) if 32 <= b < 127 else "." for b in context)
-            log(f"    @ 0x{pos:08x}: ...{printable}...", "WARN")
-            idx = pos + 1
-            shown += 1
-    else:
-        log(f"  {binary_path.name}: clean (no 'frida' strings)", "OK")
+
+def verify_binary(binary_path: Path) -> None:
+    """Reject compiled artifacts containing known forbidden runtime markers."""
+    findings = scan_forbidden_markers(binary_path)
+    if findings:
+        details = ", ".join(
+            f"{marker} x{count}" for marker, count in findings.items()
+        )
+        raise BuildError(f"Forbidden runtime markers in {binary_path.name}: {details}")
+    log(f"  {binary_path.name}: forbidden-marker scan passed", "OK")
 
 
 # ============================================================================
@@ -1031,8 +1092,7 @@ Detection vectors covered:
     if args.extended:
         apply_extended_patches(frida_dir, custom_name, port)
     elif port:
-        # Apply port patch even without --extended
-        apply_extended_patches(frida_dir, custom_name, port)
+        apply_port_patches(frida_dir, port)
 
     # Step 4: Stability fixes
     if args.temp_fixes:

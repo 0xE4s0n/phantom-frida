@@ -81,10 +81,12 @@ jobs:
             'import build, sys; build.validate_custom_name(sys.argv[1]); build.validate_port(int(sys.argv[2]))' \
             "$name" "$port"
 
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-          printf 'arch=%s\n' "$arch" >> "$GITHUB_OUTPUT"
-          printf 'name=%s\n' "$name" >> "$GITHUB_OUTPUT"
-          printf 'port=%s\n' "$port" >> "$GITHUB_OUTPUT"
+          {
+            printf 'version=%s\n' "$version"
+            printf 'arch=%s\n' "$arch"
+            printf 'name=%s\n' "$name"
+            printf 'port=%s\n' "$port"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     name: build verified artifacts
@@ -169,7 +171,7 @@ jobs:
             echo "- Architectures: ${ARCHITECTURES}"
             echo "- Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo
-            echo 'Verify the downloaded files with `sha256sum --check SHA256SUMS`.'
+            echo "Verify the downloaded files with \`sha256sum --check SHA256SUMS\`."
           } > "$notes"
 
           gh release create "$tag" \

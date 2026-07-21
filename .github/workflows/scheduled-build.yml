@@ -108,6 +108,7 @@ jobs:
       CUSTOM_NAME: ${{ needs.resolve.outputs.name }}
       CUSTOM_PORT: ${{ needs.resolve.outputs.port }}
       FRIDA_VERSION: ${{ needs.resolve.outputs.version }}
+      GH_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ github.token }}
 
     steps:

@@ -95,6 +95,33 @@ def test_collect_artifacts_does_not_promote_failed_stage(tmp_path: Path) -> None
     assert not list(output_dir.iterdir())
 
 
+def test_output_transaction_replaces_stale_files_only_after_success(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "stale-server").write_bytes(b"stale")
+
+    with build.output_transaction(output_dir) as staged_output:
+        assert (output_dir / "stale-server").is_file()
+        (staged_output / "current-server").write_bytes(b"current")
+
+    assert {path.name for path in output_dir.iterdir()} == {"current-server"}
+    assert not list(tmp_path.glob(".output-transaction-*"))
+
+
+def test_output_transaction_preserves_previous_set_on_late_failure(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "previous-server").write_bytes(b"previous")
+
+    with pytest.raises(build.BuildError, match="second architecture failed"):
+        with build.output_transaction(output_dir) as staged_output:
+            (staged_output / "first-architecture-server").write_bytes(b"partial")
+            raise build.BuildError("second architecture failed")
+
+    assert {path.name for path in output_dir.iterdir()} == {"previous-server"}
+    assert not list(tmp_path.glob(".output-transaction-*"))
+
+
 def test_rename_does_not_descend_into_build_directory(tmp_path: Path) -> None:
     source = tmp_path / "src"
     generated = tmp_path / "build"

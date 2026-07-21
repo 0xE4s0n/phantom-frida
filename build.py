@@ -29,7 +29,8 @@ import shlex
 import shutil
 import struct
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -946,6 +947,32 @@ def build_frida(frida_dir: Path, ndk_path: Path):
 # ============================================================================
 
 
+@contextmanager
+def output_transaction(output_dir: Path) -> Iterator[Path]:
+    """Replace the complete output set only after every build step succeeds."""
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    if output_dir.exists() and not output_dir.is_dir():
+        raise BuildError(f"Output path is not a directory: {output_dir}")
+
+    prefix = f".{output_dir.name}-transaction-"
+    with TemporaryDirectory(dir=output_dir.parent, prefix=prefix) as temporary:
+        transaction_dir = Path(temporary)
+        staged_output = transaction_dir / "next"
+        staged_output.mkdir()
+        yield staged_output
+
+        previous_output = transaction_dir / "previous"
+        had_previous_output = output_dir.exists()
+        if had_previous_output:
+            os.replace(output_dir, previous_output)
+        try:
+            os.replace(staged_output, output_dir)
+        except OSError as error:
+            if had_previous_output:
+                os.replace(previous_output, output_dir)
+            raise BuildError(f"Could not promote verified output directory: {error}") from error
+
+
 def collect_artifacts(
     frida_dir: Path,
     arch: str,
@@ -1249,7 +1276,6 @@ Transformations and verification boundaries:
     work_dir = Path(args.work_dir) if args.work_dir else script_dir / "build"
     output_dir = Path(args.output_dir) if args.output_dir else script_dir / "output"
     work_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Banner
     log("=" * 60, "HEADER")
@@ -1306,46 +1332,54 @@ Transformations and verification boundaries:
         log(f"  ANDROID_NDK_ROOT={ndk_path} make -j$(nproc)", "INFO")
         return
 
-    # Step 5: Build loop
-    for arch in archs:
-        log("=" * 60, "HEADER")
-        log(f"Building for {arch}", "STEP")
-        log("=" * 60, "HEADER")
+    with output_transaction(output_dir) as staged_output:
+        # Step 5: Build loop
+        for arch in archs:
+            log("=" * 60, "HEADER")
+            log(f"Building for {arch}", "STEP")
+            log("=" * 60, "HEADER")
 
-        # Configure
-        configure_arch(frida_dir, arch, ndk_path)
+            # Configure
+            configure_arch(frida_dir, arch, ndk_path)
 
-        # First build
-        log("First build...", "STEP")
-        build_frida(frida_dir, ndk_path)
+            # First build
+            log("First build...", "STEP")
+            build_frida(frida_dir, ndk_path)
 
-        # Post-build patches (frida_agent_main appears only after first build)
-        apply_post_build_patches(frida_dir, custom_name)
+            # Post-build patches (frida_agent_main appears only after first build)
+            apply_post_build_patches(frida_dir, custom_name)
 
-        # Second build (incremental — only recompiles files with patched symbol)
-        log("Second build (incremental)...", "STEP")
-        build_frida(frida_dir, ndk_path)
+            # Second build (incremental — only recompiles files with patched symbol)
+            log("Second build (incremental)...", "STEP")
+            build_frida(frida_dir, ndk_path)
 
-        # Collect and binary-patch artifacts
-        collect_artifacts(frida_dir, arch, custom_name, version, output_dir, args.extended)
+            # Collect and binary-patch artifacts
+            collect_artifacts(
+                frida_dir,
+                arch,
+                custom_name,
+                version,
+                staged_output,
+                args.extended,
+            )
 
-    # Step 6: Verification
-    if args.verify:
-        log("=" * 60, "HEADER")
-        log("Verification: scanning for residual 'frida' strings...", "STEP")
-        for f in sorted(output_dir.iterdir()):
-            if f.is_file() and not f.name.endswith(".gz"):
-                verify_binary(f)
+        # Step 6: Verification
+        if args.verify:
+            log("=" * 60, "HEADER")
+            log("Verification: scanning for residual 'frida' strings...", "STEP")
+            for f in sorted(staged_output.iterdir()):
+                if f.is_file() and not f.name.endswith(".gz"):
+                    verify_binary(f)
 
-    write_release_assets(
-        output_dir,
-        builder_dir=script_dir,
-        frida_dir=frida_dir,
-        name=custom_name,
-        port=port,
-        version=version,
-        architectures=archs,
-    )
+        write_release_assets(
+            staged_output,
+            builder_dir=script_dir,
+            frida_dir=frida_dir,
+            name=custom_name,
+            port=port,
+            version=version,
+            architectures=archs,
+        )
 
     # Done
     log("=" * 60, "HEADER")

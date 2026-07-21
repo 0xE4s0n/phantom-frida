@@ -43,21 +43,28 @@ for cmd in git python3 curl unzip make; do
 done
 
 # Build command
-BUILD_CMD="python3 $SCRIPT_DIR/build.py --version $FRIDA_VERSION --name $CUSTOM_NAME --arch $BUILD_ARCH --verify"
+build_cmd=(
+    python3 "$SCRIPT_DIR/build.py"
+    --version "$FRIDA_VERSION"
+    --name "$CUSTOM_NAME"
+    --arch "$BUILD_ARCH"
+    --verify
+)
 
 if [ -n "$CUSTOM_PORT" ]; then
-    BUILD_CMD="$BUILD_CMD --port $CUSTOM_PORT"
+    build_cmd+=(--port "$CUSTOM_PORT")
 fi
 
 if [ "$EXTENDED" = "1" ]; then
-    BUILD_CMD="$BUILD_CMD --extended"
+    build_cmd+=(--extended)
 fi
 
 if [ "$TEMP_FIXES" = "1" ]; then
-    BUILD_CMD="$BUILD_CMD --temp-fixes"
+    build_cmd+=(--temp-fixes)
 fi
 
-echo "Running: $BUILD_CMD"
-echo ""
+printf 'Running:'
+printf ' %q' "${build_cmd[@]}"
+printf '\n\n'
 
-exec $BUILD_CMD
+exec "${build_cmd[@]}"

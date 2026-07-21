@@ -1,7 +1,7 @@
 # Android acceptance: Frida 17.16.3
 
-Tested on 2026-07-21 with artifacts built from builder commit
-`98afaa4f9c9b9322d70d3858a17cabb6dab3668c`.
+Tested on 2026-07-21 with locally built Frida 17.16.3 Android arm64
+artifacts. Their exact hashes are recorded below.
 
 ## Environment
 

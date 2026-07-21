@@ -3,7 +3,15 @@ output/
 output-dl/
 debug/
 __pycache__/
+.coverage
+.coverage.*
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+htmlcov/
 node_modules/
 *.pyc
+android-smoke-report.json
 .DS_Store
 .worktrees/

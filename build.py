@@ -3,13 +3,13 @@
 Custom Frida Builder — build anti-detection Frida server from source.
 
 Extended beyond ajeossida with additional stealth techniques.
-Verified against Frida 17.7.2 source code.
+Compatibility target: Frida 17.16.3.
 
 Usage (run in WSL Ubuntu):
-    python3 build.py --version 17.7.2
-    python3 build.py --version 17.7.2 --name stealth --port 27142
-    python3 build.py --version 17.7.2 --arch android-arm64,android-arm --extended
-    python3 build.py --version 17.7.2 --skip-build  # only patch, don't compile
+    python3 build.py --version 17.16.3
+    python3 build.py --version 17.16.3 --name stealth --port 27142
+    python3 build.py --version 17.16.3 --arch android-arm64,android-arm --extended
+    python3 build.py --version 17.16.3 --skip-build  # only patch, don't compile
 
 Requirements:
     - Ubuntu 22.04+ (WSL works)
@@ -120,9 +120,7 @@ def run(
     except OSError as error:
         raise BuildError(f"Unable to run command: {rendered_command}: {error}") from error
     if check and result.returncode != 0:
-        raise BuildError(
-            f"Command failed with exit code {result.returncode}: {rendered_command}"
-        )
+        raise BuildError(f"Command failed with exit code {result.returncode}: {rendered_command}")
     return result
 
 
@@ -156,9 +154,7 @@ def parse_architectures(value: str) -> list[str]:
     invalid = [architecture for architecture in architectures if architecture not in ALL_ARCHS]
     if invalid:
         shown = invalid[0] or "<empty>"
-        raise BuildError(
-            f"Unknown architecture: {shown}. Valid: {', '.join(ALL_ARCHS)}"
-        )
+        raise BuildError(f"Unknown architecture: {shown}. Valid: {', '.join(ALL_ARCHS)}")
     return architectures
 
 
@@ -211,10 +207,7 @@ def find_d8_command() -> list[str]:
         return [os.fspath(sorted(executables, key=os.fspath, reverse=True)[0])]
 
     jars = {
-        candidate
-        for root in roots
-        for candidate in root.rglob("d8.jar")
-        if candidate.is_file()
+        candidate for root in roots for candidate in root.rglob("d8.jar") if candidate.is_file()
     }
     if jars:
         d8_jar = sorted(jars, key=os.fspath, reverse=True)[0]
@@ -236,6 +229,7 @@ def detect_frida_major(version: str) -> int:
 # File operations
 # ============================================================================
 
+
 def replace_in_file(filepath: Path, old: str, new: str) -> int:
     """Replace string in a single file. Returns number of replacements."""
     try:
@@ -250,8 +244,7 @@ def replace_in_file(filepath: Path, old: str, new: str) -> int:
     return count
 
 
-def replace_in_tree(root: Path, old: str, new: str,
-                    include_build: bool = False) -> int:
+def replace_in_tree(root: Path, old: str, new: str, include_build: bool = False) -> int:
     """Recursively replace string in all text files under root."""
     total = 0
     skip_dirs = {".git", "node_modules", "__pycache__", ".venv"}
@@ -265,8 +258,23 @@ def replace_in_tree(root: Path, old: str, new: str,
             if fpath.is_symlink():
                 continue
             # Skip binary files by extension
-            if fpath.suffix in {".o", ".a", ".so", ".gz", ".zip", ".png", ".jpg", ".pyc",
-                                ".dex", ".jar", ".class", ".elf", ".wasm", ".dylib", ".dll"}:
+            if fpath.suffix in {
+                ".o",
+                ".a",
+                ".so",
+                ".gz",
+                ".zip",
+                ".png",
+                ".jpg",
+                ".pyc",
+                ".dex",
+                ".jar",
+                ".class",
+                ".elf",
+                ".wasm",
+                ".dylib",
+                ".dll",
+            }:
                 continue
             total += replace_in_file(fpath, old, new)
 
@@ -276,6 +284,7 @@ def replace_in_tree(root: Path, old: str, new: str,
 # ============================================================================
 # NDK
 # ============================================================================
+
 
 def ensure_ndk(work_dir: Path) -> Path:
     """Download and extract Android NDK if needed."""
@@ -302,6 +311,7 @@ def ensure_ndk(work_dir: Path) -> Path:
 # ============================================================================
 # Clone
 # ============================================================================
+
 
 def clone_frida(version: str, work_dir: Path) -> Path:
     """Clone Frida source at the specified version tag."""
@@ -332,6 +342,7 @@ def clone_frida(version: str, work_dir: Path) -> Path:
 # ============================================================================
 # PHASE 1: Source-level patches (before build)
 # ============================================================================
+
 
 def rename_frida_files(frida_dir: Path, custom_name: str):
     """
@@ -380,9 +391,7 @@ def rename_frida_files(frida_dir: Path, custom_name: str):
         log(f"  Renamed {renamed_count} files on disk", "OK")
 
 
-def _require_success(
-    tool: str, result: subprocess.CompletedProcess[str]
-) -> None:
+def _require_success(tool: str, result: subprocess.CompletedProcess[str]) -> None:
     if result.returncode == 0:
         return
     details = (result.stderr or result.stdout or "").strip()
@@ -498,8 +507,7 @@ def rebuild_helper_dex(frida_dir: Path, custom_name: str) -> Path:
         shutil.copy2(new_dex, dex_file)
 
     log(
-        f"  Helper DEX rebuilt: {dex_file.stat().st_size} bytes "
-        f"(package: re.{custom_name})",
+        f"  Helper DEX rebuilt: {dex_file.stat().st_size} bytes (package: re.{custom_name})",
         "OK",
     )
     return dex_file
@@ -657,7 +665,7 @@ def apply_extended_patches(frida_dir: Path, custom_name: str, port: int | None):
     # They are NOT visible to other apps (only over USB/TCP channel), so not a detection vector.
     # The D-Bus service name (re.frida.server) IS renamed by global source patches — that's safe.
 
-    # --- Internal identifiers (C symbols, GType names) ---
+    # --- Selected GType identifiers ---
     internal_patches = get_internal_patches(custom_name, cap_name)
     for old, new in internal_patches:
         count = replace_in_tree(frida_dir, old, new)
@@ -708,6 +716,7 @@ def apply_stability_fixes(frida_dir: Path, frida_major: int):
 # PHASE 3: Post-build patches (after first compilation)
 # ============================================================================
 
+
 def apply_post_build_patches(frida_dir: Path, custom_name: str):
     """Patch frida_agent_main symbol (generated during first build).
 
@@ -717,8 +726,9 @@ def apply_post_build_patches(frida_dir: Path, custom_name: str):
     Both must be renamed together, otherwise linker error.
     """
     log("PHASE 3: Post-build patches (frida_agent_main)...", "STEP")
-    count = replace_in_tree(frida_dir, "frida_agent_main", f"{custom_name}_agent_main",
-                            include_build=True)
+    count = replace_in_tree(
+        frida_dir, "frida_agent_main", f"{custom_name}_agent_main", include_build=True
+    )
     log(f"  frida_agent_main -> {custom_name}_agent_main ({count})", "OK")
 
 
@@ -726,11 +736,12 @@ def apply_post_build_patches(frida_dir: Path, custom_name: str):
 # PHASE 4: Binary-level patches (after second compilation)
 # ============================================================================
 
+
 def find_dex_regions(data: bytes) -> list[tuple[int, int]]:
     """Find embedded DEX sections in binary data by scanning for DEX magic.
     Returns list of (start, end) byte ranges to protect from modification."""
     regions = []
-    dex_magics = [b'dex\n035\x00', b'dex\n037\x00', b'dex\n038\x00', b'dex\n039\x00']
+    dex_magics = [b"dex\n035\x00", b"dex\n037\x00", b"dex\n038\x00", b"dex\n039\x00"]
     for magic in dex_magics:
         idx = 0
         while True:
@@ -739,8 +750,8 @@ def find_dex_regions(data: bytes) -> list[tuple[int, int]]:
                 break
             # Read header_size and file_size from DEX header
             if pos + 0x28 < len(data):
-                file_size = struct.unpack_from('<I', data, pos + 0x20)[0]
-                header_size = struct.unpack_from('<I', data, pos + 0x24)[0]
+                file_size = struct.unpack_from("<I", data, pos + 0x20)[0]
+                header_size = struct.unpack_from("<I", data, pos + 0x24)[0]
                 # Valid DEX: header_size=112 (0x70), file_size > header_size
                 if header_size == 112 and file_size > 112 and file_size < 10_000_000:
                     regions.append((pos, pos + file_size))
@@ -753,8 +764,9 @@ def find_dex_regions(data: bytes) -> list[tuple[int, int]]:
     return regions
 
 
-def replace_bytes_outside_regions(data: bytes, old: bytes, new: bytes,
-                                   skip_regions: list[tuple[int, int]]) -> tuple[bytes, int]:
+def replace_bytes_outside_regions(
+    data: bytes, old: bytes, new: bytes, skip_regions: list[tuple[int, int]]
+) -> tuple[bytes, int]:
     """Replace byte pattern in data, skipping protected regions.
     Returns (modified_data, replacement_count)."""
     assert len(old) == len(new), "Replacement must be same length"
@@ -768,7 +780,7 @@ def replace_bytes_outside_regions(data: bytes, old: bytes, new: bytes,
         # Check if this position falls inside any protected region
         in_protected = any(start <= pos < end for start, end in skip_regions)
         if not in_protected:
-            result[pos:pos + len(new)] = new
+            result[pos : pos + len(new)] = new
             count += 1
         idx = pos + 1
     return bytes(result), count
@@ -820,6 +832,7 @@ def apply_binary_patches(binary_path: Path, custom_name: str, extended: bool = F
 # Build
 # ============================================================================
 
+
 def configure_arch(frida_dir: Path, arch: str, ndk_path: Path):
     log(f"Configuring for {arch}...", "STEP")
     run(
@@ -842,6 +855,7 @@ def build_frida(frida_dir: Path, ndk_path: Path):
 # ============================================================================
 # Collect artifacts
 # ============================================================================
+
 
 def collect_artifacts(
     frida_dir: Path,
@@ -966,6 +980,7 @@ def collect_artifacts(
 # Verification
 # ============================================================================
 
+
 def scan_forbidden_markers(binary_path: Path) -> dict[str, int]:
     """Count runtime markers that indicate an invalid output artifact."""
     if not binary_path.is_file():
@@ -982,9 +997,7 @@ def verify_binary(binary_path: Path) -> None:
     """Reject compiled artifacts containing known forbidden runtime markers."""
     findings = scan_forbidden_markers(binary_path)
     if findings:
-        details = ", ".join(
-            f"{marker} x{count}" for marker, count in findings.items()
-        )
+        details = ", ".join(f"{marker} x{count}" for marker, count in findings.items())
         raise BuildError(f"Forbidden runtime markers in {binary_path.name}: {details}")
     log(f"  {binary_path.name}: forbidden-marker scan passed", "OK")
 
@@ -1011,9 +1024,7 @@ def create_build_info(
     repository = os.environ.get("GITHUB_REPOSITORY")
     run_id = os.environ.get("GITHUB_RUN_ID")
     workflow_url = (
-        f"https://github.com/{repository}/actions/runs/{run_id}"
-        if repository and run_id
-        else None
+        f"https://github.com/{repository}/actions/runs/{run_id}" if repository and run_id else None
     )
     return {
         "architectures": architectures,
@@ -1060,10 +1071,7 @@ def write_release_assets(
         for path in output_dir.iterdir()
         if path.is_file() and path.name not in {info_path.name, sums_path.name}
     )
-    lines = [
-        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}"
-        for path in artifacts
-    ]
+    lines = [f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}" for path in artifacts]
     sums_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return info_path, sums_path
 
@@ -1072,50 +1080,70 @@ def write_release_assets(
 # Main
 # ============================================================================
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build custom anti-detection Frida server from source",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 build.py --version 17.7.2
-  python3 build.py --version 17.7.2 --name stealth --port 27142
-  python3 build.py --version 17.7.2 --arch android-arm64,android-arm --extended
-  python3 build.py --version 17.7.2 --skip-build  # patch only, no compilation
-  python3 build.py --version 17.7.2 --temp-fixes   # add stability patches
+  python3 build.py --version 17.16.3
+  python3 build.py --version 17.16.3 --name stealth --port 27142
+  python3 build.py --version 17.16.3 --arch android-arm64,android-arm --extended
+  python3 build.py --version 17.16.3 --skip-build  # patch only, no compilation
+  python3 build.py --version 17.16.3 --temp-fixes  # add stability patches
 
-Detection vectors covered:
-""" + DETECTION_VECTORS,
+Transformations and verification boundaries:
+"""
+        + DETECTION_VECTORS,
     )
 
-    parser.add_argument("--version", "-v", required=True,
-                        help="Frida version to build (e.g. 17.7.2)")
-    parser.add_argument("--arch", "-a", default="android-arm64",
-                        help=f"Comma-separated architectures. Options: {', '.join(ALL_ARCHS)}")
-    parser.add_argument("--name", "-n", default="ajeossida",
-                        help="Custom name replacing 'frida' everywhere (default: ajeossida)")
-    parser.add_argument("--port", "-p", type=int, default=None,
-                        help="Custom listening port (default: 27042 unchanged)")
+    parser.add_argument(
+        "--version", "-v", required=True, help="Frida version to build (e.g. 17.16.3)"
+    )
+    parser.add_argument(
+        "--arch",
+        "-a",
+        default="android-arm64",
+        help=f"Comma-separated architectures. Options: {', '.join(ALL_ARCHS)}",
+    )
+    parser.add_argument(
+        "--name", "-n", default="ajeossida", help="Replacement for supported internal identifiers"
+    )
+    parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=None,
+        help="Custom listening port (default: 27042 unchanged)",
+    )
     parser.add_argument(
         "--extended",
         "-e",
         action="store_true",
-        help="Apply extended anti-detection (D-Bus interfaces, symbols, paths, binary sweep)",
+        help="Apply optional port, GType, path, and byte transformations",
     )
-    parser.add_argument("--temp-fixes", action="store_true",
-                        help="Apply stability fixes (perfetto skip, cloak detach)")
-    parser.add_argument("--work-dir", "-w", default=None,
-                        help="Working directory (default: ./build)")
-    parser.add_argument("--output-dir", "-o", default=None,
-                        help="Output directory (default: ./output)")
-    parser.add_argument("--ndk-path", default=None,
-                        help="Path to existing Android NDK r29 (skip download)")
-    parser.add_argument("--skip-clone", action="store_true",
-                        help="Use existing source in work-dir")
-    parser.add_argument("--skip-build", action="store_true",
-                        help="Only apply patches, don't compile")
-    parser.add_argument("--verify", action="store_true",
-                        help="After build, scan binaries for residual 'frida' strings")
+    parser.add_argument(
+        "--temp-fixes",
+        action="store_true",
+        help="Apply stability fixes (perfetto skip, cloak detach)",
+    )
+    parser.add_argument(
+        "--work-dir", "-w", default=None, help="Working directory (default: ./build)"
+    )
+    parser.add_argument(
+        "--output-dir", "-o", default=None, help="Output directory (default: ./output)"
+    )
+    parser.add_argument(
+        "--ndk-path", default=None, help="Path to existing Android NDK r29 (skip download)"
+    )
+    parser.add_argument("--skip-clone", action="store_true", help="Use existing source in work-dir")
+    parser.add_argument(
+        "--skip-build", action="store_true", help="Only apply patches, don't compile"
+    )
+    parser.add_argument(
+        "--verify", action="store_true", help="Reject known forbidden markers in final artifacts"
+    )
 
     args = parser.parse_args()
 

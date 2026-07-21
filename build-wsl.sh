@@ -9,7 +9,7 @@
 #   bash build-wsl.sh
 #
 # Configuration via environment variables:
-#   FRIDA_VERSION=17.7.2  (required)
+#   FRIDA_VERSION=17.16.3 (default)
 #   CUSTOM_NAME=stealth   (default: ajeossida)
 #   CUSTOM_PORT=27142     (default: 27042)
 #   BUILD_ARCH=android-arm64  (default: android-arm64)
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-FRIDA_VERSION="${FRIDA_VERSION:-17.7.2}"
+FRIDA_VERSION="${FRIDA_VERSION:-17.16.3}"
 CUSTOM_NAME="${CUSTOM_NAME:-ajeossida}"
 CUSTOM_PORT="${CUSTOM_PORT:-}"
 BUILD_ARCH="${BUILD_ARCH:-android-arm64}"

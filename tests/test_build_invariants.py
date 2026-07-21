@@ -122,9 +122,7 @@ def test_rebuild_helper_dex_fails_without_javac(
     monkeypatch.setattr(
         build.subprocess,
         "run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=1, stdout="", stderr="missing"
-        ),
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="missing"),
     )
 
     with pytest.raises(build.BuildError, match="javac"):
@@ -132,9 +130,7 @@ def test_rebuild_helper_dex_fails_without_javac(
 
 
 @pytest.mark.parametrize("tool", ["javac", "jar", "java"])
-def test_require_executable_names_missing_tool(
-    tool: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_require_executable_names_missing_tool(tool: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(build.shutil, "which", lambda _name: None)
 
     with pytest.raises(build.BuildError, match=tool):
@@ -177,9 +173,7 @@ def test_find_d8_fails_when_sdk_has_no_build_tools(
         build.find_d8_command()
 
 
-def test_find_d8_uses_sdk_jar_entry_point(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_find_d8_uses_sdk_jar_entry_point(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     d8_jar = tmp_path / "build-tools/36.0.0/lib/d8.jar"
     d8_jar.parent.mkdir(parents=True)
     d8_jar.write_bytes(b"jar")

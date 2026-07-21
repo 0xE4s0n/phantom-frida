@@ -31,9 +31,7 @@ def test_release_assets_record_revisions_and_checksums(
     assert info["frida_core_commit"] == "core-sha"
     assert info["ndk_version"] == "r29"
     assert info["port"] == 27142
-    assert hashlib.sha256(b"artifact").hexdigest() in sums_path.read_text(
-        encoding="utf-8"
-    )
+    assert hashlib.sha256(b"artifact").hexdigest() in sums_path.read_text(encoding="utf-8")
 
 
 def test_release_assets_are_sorted_and_exclude_metadata_from_checksums(
@@ -59,9 +57,7 @@ def test_release_assets_are_sorted_and_exclude_metadata_from_checksums(
     assert sums_path.name not in sums_path.read_text(encoding="utf-8")
 
 
-def test_build_info_records_workflow_url(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_info_records_workflow_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(build, "git_revision", lambda _path: "revision")
     monkeypatch.setenv("GITHUB_REPOSITORY", "TheQmaks/phantom-frida")
     monkeypatch.setenv("GITHUB_RUN_ID", "12345")
@@ -75,6 +71,4 @@ def test_build_info_records_workflow_url(
         architectures=["android-arm64"],
     )
 
-    assert info["workflow_url"] == (
-        "https://github.com/TheQmaks/phantom-frida/actions/runs/12345"
-    )
+    assert info["workflow_url"] == ("https://github.com/TheQmaks/phantom-frida/actions/runs/12345")

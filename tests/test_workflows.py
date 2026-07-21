@@ -42,8 +42,7 @@ def test_workflows_do_not_execute_expression_generated_commands() -> None:
     combined = "\n".join(path.read_text(encoding="utf-8") for path in WORKFLOWS)
     for workflow in WORKFLOWS:
         assert all(
-            "${{" not in block
-            for block in run_blocks(workflow.read_text(encoding="utf-8"))
+            "${{" not in block for block in run_blocks(workflow.read_text(encoding="utf-8"))
         ), workflow
     assert "run: ${{" not in combined
     assert "curl -s https://api.github.com/repos/frida/frida/releases/latest" not in combined

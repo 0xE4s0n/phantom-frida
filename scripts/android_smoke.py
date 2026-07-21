@@ -53,9 +53,7 @@ def assert_clean_proc_text(label: str, text: str) -> None:
     lowered = text.lower()
     matches = [marker for marker in forbidden if marker in lowered]
     if matches:
-        raise SmokeFailure(
-            f"{label} contains forbidden marker(s): {', '.join(matches)}"
-        )
+        raise SmokeFailure(f"{label} contains forbidden marker(s): {', '.join(matches)}")
 
 
 def require_single_device(adb_output: str) -> str:
@@ -65,9 +63,7 @@ def require_single_device(adb_output: str) -> str:
         if len(fields := line.split()) >= 2 and fields[1] == "device"
     ]
     if len(devices) != 1:
-        raise SmokeFailure(
-            f"Expected exactly one authorized adb device, found {len(devices)}"
-        )
+        raise SmokeFailure(f"Expected exactly one authorized adb device, found {len(devices)}")
     return devices[0]
 
 
@@ -137,9 +133,7 @@ def run_command(
     if check and result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip()
         suffix = f": {details}" if details else ""
-        raise SmokeFailure(
-            f"Command failed with exit code {result.returncode}: {argv[0]}{suffix}"
-        )
+        raise SmokeFailure(f"Command failed with exit code {result.returncode}: {argv[0]}{suffix}")
     return result
 
 
@@ -158,9 +152,7 @@ def root_shell(
 def _load_matching_frida(config: AndroidSmokeConfig) -> ModuleType:
     metadata_path = config.server.parent / "build-info.json"
     if not metadata_path.is_file():
-        raise SmokeFailure(
-            f"build-info.json is required beside the server: {metadata_path}"
-        )
+        raise SmokeFailure(f"build-info.json is required beside the server: {metadata_path}")
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         expected = str(metadata["frida_version"])
@@ -173,9 +165,7 @@ def _load_matching_frida(config: AndroidSmokeConfig) -> ModuleType:
         raise SmokeFailure(f"Install the matching Frida Python package ({expected})") from error
     actual = str(getattr(frida_module, "__version__", "unknown"))
     if actual != expected:
-        raise SmokeFailure(
-            f"Frida version mismatch: build requires {expected}, host has {actual}"
-        )
+        raise SmokeFailure(f"Frida version mismatch: build requires {expected}, host has {actual}")
     return frida_module
 
 
@@ -264,9 +254,7 @@ def _run_script_acceptance(
         device.resume(pid)
 
         if not completed.wait(SCRIPT_TIMEOUT_SECONDS):
-            raise SmokeFailure(
-                f"Frida script timed out after {SCRIPT_TIMEOUT_SECONDS} seconds"
-            )
+            raise SmokeFailure(f"Frida script timed out after {SCRIPT_TIMEOUT_SECONDS} seconds")
         if "error" in outcome:
             raise SmokeFailure(f"Frida script error: {outcome['error']}")
         payload = outcome.get("payload")
@@ -308,9 +296,7 @@ def _scan_process_procfs(serial: str, pid: int) -> None:
         "unix": "cat /proc/net/unix",
         "maps": f"cat /proc/{pid}/maps",
         "fds": f"ls -l /proc/{pid}/fd",
-        "threads": (
-            f'for file in /proc/{pid}/task/*/comm; do cat "$file"; done'
-        ),
+        "threads": (f'for file in /proc/{pid}/task/*/comm; do cat "$file"; done'),
     }
     for label, command in commands.items():
         result = root_shell(serial, command)
@@ -426,9 +412,7 @@ def _cleanup(config: AndroidSmokeConfig, serial: str) -> None:
         adb(serial, "forward", "--remove", f"tcp:{port}", check=False)
 
 
-def run_android_smoke(
-    config: AndroidSmokeConfig, script_path: Path
-) -> dict[str, object]:
+def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str, object]:
     frida_module = _load_matching_frida(config)
     agent_source = _compile_agent(frida_module, script_path)
     serial = require_single_device(run_command(["adb", "devices", "-l"]).stdout)
@@ -450,18 +434,14 @@ def run_android_smoke(
     try:
         _configure_forward(serial, config.port)
         run_command(server_start_command(serial, remote_server, config.port))
-        server_device, processes = _wait_for_remote_device(
-            manager, f"127.0.0.1:{config.port}"
-        )
+        server_device, processes = _wait_for_remote_device(manager, f"127.0.0.1:{config.port}")
         if not processes:
             raise SmokeFailure("Stock Frida enumerated no processes through the server")
         report["server_process_count"] = len(processes)
         report["server"] = _run_script_acceptance(
             server_device, serial, config.package, agent_source
         )
-        report["gadget"] = _exercise_gadget(
-            config, serial, manager, remote_gadget
-        )
+        report["gadget"] = _exercise_gadget(config, serial, manager, remote_gadget)
         report["status"] = "passed"
         return report
     finally:

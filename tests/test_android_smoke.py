@@ -36,9 +36,7 @@ def test_require_single_device_returns_only_authorized_serial() -> None:
         ("List of devices attached\nONE\tdevice\nTWO\tdevice\n", 2),
     ],
 )
-def test_require_single_device_rejects_invalid_device_count(
-    output: str, count: int
-) -> None:
+def test_require_single_device_rejects_invalid_device_count(output: str, count: int) -> None:
     with pytest.raises(android_smoke.SmokeFailure, match=f"found {count}"):
         android_smoke.require_single_device(output)
 
@@ -53,10 +51,7 @@ def test_server_start_command_uses_fixed_adb_argument_vector() -> None:
         "shell",
         "su",
         "-c",
-        (
-            "/data/local/tmp/phantom-frida-test/oemcodec-server "
-            "-l 0.0.0.0:27142 -D"
-        ),
+        ("/data/local/tmp/phantom-frida-test/oemcodec-server -l 0.0.0.0:27142 -D"),
     ]
 
 
@@ -124,9 +119,7 @@ def test_remote_device_retry_does_not_register_duplicate_endpoint(
     manager = FakeManager()
     monkeypatch.setattr(android_smoke.time, "sleep", lambda _seconds: None)
 
-    device, processes = android_smoke._wait_for_remote_device(
-        manager, "127.0.0.1:27142", timeout=1
-    )
+    device, processes = android_smoke._wait_for_remote_device(manager, "127.0.0.1:27142", timeout=1)
 
     assert device is manager.device
     assert processes == ["process"]
@@ -142,9 +135,7 @@ def test_host_frida_version_must_match_build_metadata(
     server.write_bytes(b"server")
     gadget.write_bytes(b"gadget")
     ndk.mkdir()
-    (tmp_path / "build-info.json").write_text(
-        '{"frida_version": "17.16.3"}', encoding="utf-8"
-    )
+    (tmp_path / "build-info.json").write_text('{"frida_version": "17.16.3"}', encoding="utf-8")
     config = android_smoke.validate_config(
         server=server,
         gadget=gadget,

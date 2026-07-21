@@ -31,7 +31,7 @@ def test_readme_does_not_overclaim_protocol_or_version_support() -> None:
 
 def test_codeql_is_pinned_and_has_minimal_permissions() -> None:
     codeql = Path(".github/workflows/codeql.yml").read_text(encoding="utf-8")
-    sha = "08d09a53f0f5d694f253bd25732e4429c9e9337f"
+    sha = "e0647621c2984b5ed2f768cb892365bf2a616ad1"
     assert codeql.count(f"github/codeql-action/init@{sha}") == 1
     assert codeql.count(f"github/codeql-action/analyze@{sha}") == 1
     assert "contents: read" in codeql

@@ -122,6 +122,69 @@ def test_output_transaction_preserves_previous_set_on_late_failure(tmp_path: Pat
     assert not list(tmp_path.glob(".output-transaction-*"))
 
 
+def test_output_transaction_restores_previous_set_when_promotion_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "previous-server").write_bytes(b"previous")
+    original_replace = build.os.replace
+
+    def fail_new_output(source: str | Path, destination: str | Path) -> None:
+        if Path(source).name == "next" and Path(destination) == output_dir:
+            raise OSError("simulated promotion failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(build.os, "replace", fail_new_output)
+
+    with pytest.raises(build.BuildError, match="Could not promote verified output directory"):
+        with build.output_transaction(output_dir) as staged_output:
+            (staged_output / "current-server").write_bytes(b"current")
+
+    assert {path.name for path in output_dir.iterdir()} == {"previous-server"}
+    assert not list(tmp_path.glob(".output-transaction-*"))
+
+
+@pytest.mark.parametrize(
+    ("work_relative", "output_relative"),
+    [
+        ("workspace", "workspace"),
+        ("workspace", "workspace/output"),
+        ("workspace/build", "workspace"),
+    ],
+)
+def test_directory_layout_rejects_overlapping_work_and_output(
+    tmp_path: Path, work_relative: str, output_relative: str
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    work_dir = tmp_path / work_relative
+    output_dir = tmp_path / output_relative
+
+    with pytest.raises(build.BuildError, match="Work and output directories must not overlap"):
+        build.validate_directory_layout(repository, work_dir, output_dir)
+
+
+def test_directory_layout_rejects_output_containing_repository(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    with pytest.raises(build.BuildError, match="Output directory must not contain the repository"):
+        build.validate_directory_layout(repository, tmp_path / "work", tmp_path)
+
+
+def test_directory_layout_allows_default_repository_children(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    work_dir, output_dir = build.validate_directory_layout(
+        repository, repository / "build", repository / "output"
+    )
+
+    assert work_dir == (repository / "build").resolve()
+    assert output_dir == (repository / "output").resolve()
+
+
 def test_rename_does_not_descend_into_build_directory(tmp_path: Path) -> None:
     source = tmp_path / "src"
     generated = tmp_path / "build"

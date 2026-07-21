@@ -163,6 +163,21 @@ def parse_architectures(value: str) -> list[str]:
     return architectures
 
 
+def validate_directory_layout(
+    repository_dir: Path, work_dir: Path, output_dir: Path
+) -> tuple[Path, Path]:
+    """Resolve build paths and reject layouts that publication could destroy."""
+    repository_dir = repository_dir.resolve()
+    work_dir = work_dir.resolve()
+    output_dir = output_dir.resolve()
+
+    if output_dir == repository_dir or output_dir in repository_dir.parents:
+        raise BuildError("Output directory must not contain the repository")
+    if work_dir == output_dir or work_dir in output_dir.parents or output_dir in work_dir.parents:
+        raise BuildError("Work and output directories must not overlap")
+    return work_dir, output_dir
+
+
 def require_executable(name: str) -> str:
     """Resolve a mandatory executable or fail with its name."""
     path = shutil.which(name)
@@ -1273,8 +1288,11 @@ Transformations and verification boundaries:
 
     # Directories
     script_dir = Path(__file__).parent.resolve()
-    work_dir = Path(args.work_dir) if args.work_dir else script_dir / "build"
-    output_dir = Path(args.output_dir) if args.output_dir else script_dir / "output"
+    work_dir, output_dir = validate_directory_layout(
+        script_dir,
+        Path(args.work_dir) if args.work_dir else script_dir / "build",
+        Path(args.output_dir) if args.output_dir else script_dir / "output",
+    )
     work_dir.mkdir(parents=True, exist_ok=True)
 
     # Banner

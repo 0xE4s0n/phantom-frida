@@ -56,12 +56,12 @@ used port 27143 for the isolated Gadget check.
 | Check | Result | Evidence |
 |---|---|---|
 | Root precondition | PASS | `su -c id` returned UID 0. |
-| Stock client to Server | PASS | Frida 17.16.3 enumerated 124 processes. |
+| Stock client to Server | PASS | Frida 17.16.3 enumerated 122 processes in the latest run. |
 | Spawn, attach, and resume | PASS | The calculator process completed the scripted lifecycle. |
 | Java bridge and hook installation | PASS | `Java.available` was true and the structured agent reported no failures. |
 | `/proc` maps, file descriptors, and thread names | PASS | No forbidden `frida-server`, `frida-helper`, or `frida-zymbiote` marker was found. |
 | Zymbiote socket rename | PASS | A rooted live scan found the custom `oemcodec-zymbiote` socket and no `frida-zymbiote` socket. |
-| Stock client to Gadget | PASS | The separately loaded Gadget accepted Frida 17.16.3 and enumerated its process. |
+| Stock client to Gadget | PASS | The separately loaded Gadget accepted Frida 17.16.3, attached to its process, loaded a probe script, received its structured result, and detached. |
 | Cleanup | PASS | No test process, ADB forward, or tested socket marker remained after exit. |
 
 Redacted structured result:
@@ -72,7 +72,8 @@ Redacted structured result:
   "gadget": {
     "abi": "arm64-v8a",
     "api_level": 34,
-    "process_count": 1
+    "process_count": 1,
+    "script_loaded": true
   },
   "server": {
     "java_available": true,

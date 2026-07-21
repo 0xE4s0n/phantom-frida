@@ -150,6 +150,85 @@ def test_remote_device_retry_does_not_register_duplicate_endpoint(
     assert manager.calls == 1
 
 
+def test_gadget_acceptance_loads_script_and_detaches() -> None:
+    class FakeScript:
+        callback: object = None
+
+        def on(self, _event: str, callback: object) -> None:
+            self.callback = callback
+
+        def load(self) -> None:
+            assert callable(self.callback)
+            self.callback(
+                {
+                    "type": "send",
+                    "payload": {"type": "phantom-frida-gadget-result"},
+                },
+                None,
+            )
+
+    class FakeSession:
+        detached = False
+        source = ""
+
+        def create_script(self, source: str) -> FakeScript:
+            self.source = source
+            return FakeScript()
+
+        def detach(self) -> None:
+            self.detached = True
+
+    class FakeDevice:
+        attached_pid = 0
+        session = FakeSession()
+
+        def attach(self, pid: int) -> FakeSession:
+            self.attached_pid = pid
+            return self.session
+
+    device = FakeDevice()
+
+    android_smoke._run_gadget_script_acceptance(device, 4242)
+
+    assert device.attached_pid == 4242
+    assert "phantom-frida-gadget-result" in device.session.source
+    assert device.session.detached is True
+
+
+def test_gadget_acceptance_propagates_script_errors() -> None:
+    class ErrorScript:
+        callback: object = None
+
+        def on(self, _event: str, callback: object) -> None:
+            self.callback = callback
+
+        def load(self) -> None:
+            assert callable(self.callback)
+            self.callback({"type": "error", "description": "probe failed"}, None)
+
+    class ErrorSession:
+        detached = False
+
+        def create_script(self, _source: str) -> ErrorScript:
+            return ErrorScript()
+
+        def detach(self) -> None:
+            self.detached = True
+
+    class ErrorDevice:
+        session = ErrorSession()
+
+        def attach(self, _pid: int) -> ErrorSession:
+            return self.session
+
+    device = ErrorDevice()
+
+    with pytest.raises(android_smoke.SmokeFailure, match="Gadget script error: probe failed"):
+        android_smoke._run_gadget_script_acceptance(device, 4242)
+
+    assert device.session.detached is True
+
+
 def test_host_frida_version_must_match_build_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

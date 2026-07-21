@@ -27,6 +27,10 @@ REMOTE_DIR = "/data/local/tmp/phantom-frida-test"
 JAVA_BRIDGE_DIR = REPOSITORY_ROOT / "node_modules" / "frida-java-bridge"
 PACKAGE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$")
 SCRIPT_TIMEOUT_SECONDS = 45
+GADGET_PROBE_SOURCE = """'use strict';
+
+send({ type: 'phantom-frida-gadget-result' });
+"""
 
 
 class SmokeFailure(RuntimeError):
@@ -304,6 +308,50 @@ def _scan_process_procfs(serial: str, pid: int) -> None:
         assert_clean_proc_text(label, result.stdout)
 
 
+def _run_gadget_script_acceptance(device: Any, pid: int) -> None:
+    session: Any = None
+    outcome: dict[str, Any] = {}
+    completed = threading.Event()
+
+    def on_message(message: dict[str, Any], _data: bytes | None) -> None:
+        if message.get("type") == "error":
+            outcome["error"] = message.get("stack") or message.get("description") or message
+            completed.set()
+            return
+        payload = message.get("payload")
+        if (
+            message.get("type") == "send"
+            and isinstance(payload, dict)
+            and payload.get("type") == "phantom-frida-gadget-result"
+        ):
+            outcome["passed"] = True
+            completed.set()
+
+    try:
+        session = device.attach(pid)
+        script = session.create_script(GADGET_PROBE_SOURCE)
+        script.on("message", on_message)
+        script.load()
+        if not completed.wait(SCRIPT_TIMEOUT_SECONDS):
+            raise SmokeFailure(
+                f"Frida Gadget script timed out after {SCRIPT_TIMEOUT_SECONDS} seconds"
+            )
+        if "error" in outcome:
+            raise SmokeFailure(f"Gadget script error: {outcome['error']}")
+        if outcome.get("passed") is not True:
+            raise SmokeFailure("Frida Gadget script returned no structured result")
+    except SmokeFailure:
+        raise
+    except Exception as error:
+        raise SmokeFailure(f"Frida Gadget script acceptance failed: {error}") from error
+    finally:
+        if session is not None:
+            try:
+                session.detach()
+            except Exception:
+                pass
+
+
 def _find_ndk_clang(ndk: Path) -> Path:
     candidates = sorted(
         candidate
@@ -392,15 +440,20 @@ def _exercise_gadget(
         f"{remote_loader} {remote_gadget} >{remote_log} 2>&1 &",
     )
 
-    _, processes = _wait_for_remote_device(manager, f"127.0.0.1:{gadget_port}")
+    gadget_device, processes = _wait_for_remote_device(manager, f"127.0.0.1:{gadget_port}")
     if not processes:
         raise SmokeFailure("Stock Frida enumerated no process through Gadget")
+    gadget_pid = getattr(processes[0], "pid", None)
+    if not isinstance(gadget_pid, int):
+        raise SmokeFailure("Stock Frida returned a Gadget process without an integer pid")
+    _run_gadget_script_acceptance(gadget_device, gadget_pid)
     assert_clean_proc_text("gadget unix", root_shell(serial, "cat /proc/net/unix").stdout)
     return {
         "abi": abi,
         "api_level": api_level,
         "port": gadget_port,
         "process_count": len(processes),
+        "script_loaded": True,
     }
 
 

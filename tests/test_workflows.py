@@ -108,6 +108,12 @@ def test_release_publishes_every_file_covered_by_sha256sums() -> None:
     assert "release-assets/*.gz" not in release_command
 
 
+def test_release_targets_repository_without_requiring_checkout() -> None:
+    text = workflow_text("scheduled-build.yml")
+    release_job = text.split("  release:", 1)[1]
+    assert "GH_REPO: ${{ github.repository }}" in release_job
+
+
 def test_dependabot_updates_pinned_actions_weekly() -> None:
     text = Path(".github/dependabot.yml").read_text(encoding="utf-8")
     assert "package-ecosystem: github-actions" in text

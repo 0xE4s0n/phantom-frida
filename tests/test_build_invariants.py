@@ -203,3 +203,40 @@ def test_port_only_patch_preserves_extended_identifiers(tmp_path: Path) -> None:
 
     patched = marker.read_text(encoding="utf-8")
     assert patched == '27142 "FridaServer" ".frida"'
+
+
+def test_validate_ndk_requires_exact_revision(tmp_path: Path) -> None:
+    ndk = tmp_path / "android-ndk-r29"
+    ndk.mkdir()
+    (ndk / "source.properties").write_text(
+        "Pkg.Desc = Android NDK\nPkg.Revision = 28.2.13676358\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(build.BuildError, match="revision"):
+        build.validate_ndk(ndk)
+
+
+def test_validate_ndk_accepts_documented_revision(tmp_path: Path) -> None:
+    ndk = tmp_path / "android-ndk-r29"
+    ndk.mkdir()
+    (ndk / "source.properties").write_text(
+        "Pkg.Desc = Android NDK\nPkg.Revision = 29.0.14206865\n",
+        encoding="utf-8",
+    )
+
+    assert build.validate_ndk(ndk) == ndk
+
+
+def test_ensure_ndk_rejects_cached_archive_with_wrong_checksum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "android-ndk-r29-linux.zip"
+    archive.write_bytes(b"not the Google NDK archive")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(build, "run", lambda command, **_kwargs: commands.append(command))
+
+    with pytest.raises(build.BuildError, match="checksum"):
+        build.ensure_ndk(tmp_path)
+
+    assert commands == []

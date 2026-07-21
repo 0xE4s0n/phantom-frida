@@ -54,7 +54,9 @@ from patches import (
 # --- Constants ---
 
 NDK_VERSION = "r29"
+NDK_REVISION = "29.0.14206865"
 NDK_URL = f"https://dl.google.com/android/repository/android-ndk-{NDK_VERSION}-linux.zip"
+NDK_ARCHIVE_SHA1 = "87e2bb7e9be5d6a1c6cdf5ec40dd4e0c6d07c30b"
 ALL_ARCHS = ["android-arm64", "android-arm", "android-x86_64", "android-x86"]
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 NAME_PATTERN = re.compile(r"^[a-z][a-z0-9]{2,31}$")
@@ -286,22 +288,69 @@ def replace_in_tree(root: Path, old: str, new: str, include_build: bool = False)
 # ============================================================================
 
 
+def validate_ndk(ndk_dir: Path) -> Path:
+    """Require the exact NDK revision used by the supported build."""
+    properties = ndk_dir / "source.properties"
+    if not properties.is_file():
+        raise BuildError(f"NDK source.properties is missing: {properties}")
+    expected = f"Pkg.Revision = {NDK_REVISION}"
+    lines = properties.read_text(encoding="utf-8").splitlines()
+    if expected not in lines:
+        actual = next(
+            (line for line in lines if line.startswith("Pkg.Revision")),
+            "revision not declared",
+        )
+        raise BuildError(f"NDK revision mismatch: expected {NDK_REVISION}, found {actual}")
+    return ndk_dir
+
+
+def verify_file_checksum(path: Path, expected: str, algorithm: str) -> None:
+    """Verify a file digest without loading a large archive into memory."""
+    digest = hashlib.new(algorithm)
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    actual = digest.hexdigest()
+    if actual != expected:
+        raise BuildError(f"{path.name} checksum mismatch: expected {expected}, found {actual}")
+
+
 def ensure_ndk(work_dir: Path) -> Path:
     """Download and extract Android NDK if needed."""
     ndk_dir = work_dir / f"android-ndk-{NDK_VERSION}"
     if ndk_dir.exists():
+        validate_ndk(ndk_dir)
         log(f"NDK already at {ndk_dir}", "OK")
         return ndk_dir
 
     ndk_zip = work_dir / f"android-ndk-{NDK_VERSION}-linux.zip"
     if not ndk_zip.exists():
         log(f"Downloading NDK {NDK_VERSION} (~1.5 GB)...", "STEP")
-        run(["curl", "-L", "-o", ndk_zip, NDK_URL], cwd=work_dir)
+        partial = ndk_zip.with_suffix(f"{ndk_zip.suffix}.part")
+        run(
+            [
+                "curl",
+                "--fail",
+                "--location",
+                "--retry",
+                "3",
+                "--retry-all-errors",
+                "--output",
+                partial,
+                NDK_URL,
+            ],
+            cwd=work_dir,
+        )
+        verify_file_checksum(partial, NDK_ARCHIVE_SHA1, "sha1")
+        os.replace(partial, ndk_zip)
+    else:
+        verify_file_checksum(ndk_zip, NDK_ARCHIVE_SHA1, "sha1")
 
     log("Extracting NDK...", "STEP")
     run(["unzip", "-q", ndk_zip], cwd=work_dir)
 
     if ndk_dir.exists():
+        validate_ndk(ndk_dir)
         log(f"NDK ready at {ndk_dir}", "OK")
         ndk_zip.unlink(missing_ok=True)
         return ndk_dir
@@ -1175,9 +1224,7 @@ Transformations and verification boundaries:
 
     # Step 1: NDK
     if args.ndk_path:
-        ndk_path = Path(args.ndk_path).resolve()
-        if not ndk_path.exists():
-            raise BuildError(f"NDK path does not exist: {ndk_path}")
+        ndk_path = validate_ndk(Path(args.ndk_path).resolve())
     else:
         ndk_path = ensure_ndk(work_dir)
     log(f"  NDK:      {ndk_path}", "INFO")

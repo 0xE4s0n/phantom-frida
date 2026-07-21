@@ -22,27 +22,28 @@ Requirements:
 import argparse
 import gzip
 import os
+import re
+import shlex
 import shutil
 import struct
 import subprocess
-import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from patches import (
-    get_source_patches,
-    get_targeted_patches,
+    DETECTION_VECTORS,
+    LIBC_HOOK_PATCHES,
+    MEMFD_PATCHES,
+    SELINUX_PATCHES,
     get_binary_patches,
     get_binary_string_patches,
-    get_rollback_patches,
-    get_port_patches,
-    get_transport_patches,
     get_internal_patches,
-    get_temp_path_patches,
+    get_port_patches,
+    get_rollback_patches,
+    get_source_patches,
     get_stability_patches_17,
-    MEMFD_PATCHES,
-    LIBC_HOOK_PATCHES,
-    SELINUX_PATCHES,
-    DETECTION_VECTORS,
+    get_targeted_patches,
+    get_temp_path_patches,
 )
 
 # --- Constants ---
@@ -50,6 +51,12 @@ from patches import (
 NDK_VERSION = "r29"
 NDK_URL = f"https://dl.google.com/android/repository/android-ndk-{NDK_VERSION}-linux.zip"
 ALL_ARCHS = ["android-arm64", "android-arm", "android-x86_64", "android-x86"]
+VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
+NAME_PATTERN = re.compile(r"^[a-z][a-z0-9]{2,31}$")
+
+
+class BuildError(RuntimeError):
+    """Expected build failure that should be shown without a traceback."""
 
 
 def log(msg: str, level: str = "INFO"):
@@ -66,21 +73,77 @@ def log(msg: str, level: str = "INFO"):
     print(f"{color}[{level}]{reset} {msg}", flush=True)
 
 
-def run(cmd: str, cwd: str | None = None, env: dict | None = None,
-        check: bool = True) -> subprocess.CompletedProcess:
-    """Run a shell command with inherited env + overrides."""
+def run(
+    command: Sequence[str | os.PathLike[str]],
+    cwd: str | os.PathLike[str] | None = None,
+    env: Mapping[str, str] | None = None,
+    check: bool = True,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run an argument vector with inherited environment plus overrides."""
+    if isinstance(command, (str, bytes)):
+        raise BuildError("Commands must be passed as an argument vector")
+
+    argv = [os.fspath(part) for part in command]
+    if not argv:
+        raise BuildError("Command argument vector must not be empty")
+
     full_env = os.environ.copy()
     if env:
         full_env.update(env)
-    log(f"$ {cmd}", "INFO")
-    result = subprocess.run(
-        cmd, shell=True, cwd=cwd, env=full_env,
-        capture_output=False, text=True,
-    )
+    rendered_command = shlex.join(argv)
+    log(f"$ {rendered_command}", "INFO")
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=cwd,
+            env=full_env,
+            capture_output=capture_output,
+            text=True,
+        )
+    except OSError as error:
+        raise BuildError(f"Unable to run command: {rendered_command}: {error}") from error
     if check and result.returncode != 0:
-        log(f"Command failed with exit code {result.returncode}", "ERROR")
-        sys.exit(1)
+        raise BuildError(
+            f"Command failed with exit code {result.returncode}: {rendered_command}"
+        )
     return result
+
+
+def validate_version(value: str) -> str:
+    """Accept only concrete Frida release tags such as 17.16.3."""
+    if VERSION_PATTERN.fullmatch(value) is None:
+        raise BuildError("Frida version must use the numeric X.Y.Z release format")
+    return value
+
+
+def validate_custom_name(value: str) -> str:
+    """Normalize and validate the identifier used in paths, packages, and symbols."""
+    normalized = value.lower()
+    if NAME_PATTERN.fullmatch(normalized) is None:
+        raise BuildError(
+            "Custom name must be 3-32 lowercase letters or digits and start with a letter"
+        )
+    return normalized
+
+
+def validate_port(value: int | None) -> int | None:
+    """Validate an optional TCP port."""
+    if value is not None and not 1 <= value <= 65535:
+        raise BuildError("Port must be between 1 and 65535")
+    return value
+
+
+def parse_architectures(value: str) -> list[str]:
+    """Parse and validate the requested Android architecture list."""
+    architectures = [architecture.strip() for architecture in value.split(",")]
+    invalid = [architecture for architecture in architectures if architecture not in ALL_ARCHS]
+    if invalid:
+        shown = invalid[0] or "<empty>"
+        raise BuildError(
+            f"Unknown architecture: {shown}. Valid: {', '.join(ALL_ARCHS)}"
+        )
+    return architectures
 
 
 def detect_frida_major(version: str) -> int:
@@ -142,18 +205,16 @@ def ensure_ndk(work_dir: Path) -> Path:
     ndk_zip = work_dir / f"android-ndk-{NDK_VERSION}-linux.zip"
     if not ndk_zip.exists():
         log(f"Downloading NDK {NDK_VERSION} (~1.5 GB)...", "STEP")
-        run(f"curl -L -o {ndk_zip} {NDK_URL}", cwd=str(work_dir))
+        run(["curl", "-L", "-o", ndk_zip, NDK_URL], cwd=work_dir)
 
     log("Extracting NDK...", "STEP")
-    run(f"unzip -q {ndk_zip}", cwd=str(work_dir))
+    run(["unzip", "-q", ndk_zip], cwd=work_dir)
 
     if ndk_dir.exists():
         log(f"NDK ready at {ndk_dir}", "OK")
         ndk_zip.unlink(missing_ok=True)
         return ndk_dir
-    else:
-        log("NDK extraction failed", "ERROR")
-        sys.exit(1)
+    raise BuildError(f"NDK extraction did not create expected directory: {ndk_dir}")
 
 
 # ============================================================================
@@ -169,9 +230,18 @@ def clone_frida(version: str, work_dir: Path) -> Path:
 
     log(f"Cloning Frida {version} (with submodules)...", "STEP")
     run(
-        f"git clone --recurse-submodules --branch {version} --depth 1 "
-        f"https://github.com/frida/frida.git {frida_dir}",
-        cwd=str(work_dir),
+        [
+            "git",
+            "clone",
+            "--recurse-submodules",
+            "--branch",
+            version,
+            "--depth",
+            "1",
+            "https://github.com/frida/frida.git",
+            frida_dir,
+        ],
+        cwd=work_dir,
     )
     log(f"Frida {version} cloned", "OK")
     return frida_dir
@@ -276,8 +346,8 @@ def rebuild_helper_dex(frida_dir: Path, custom_name: str):
     java_build.mkdir(exist_ok=True)
 
     # Check if javac is available
-    javac_check = subprocess.run(["javac", "-version"], capture_output=True, text=True)
-    if javac_check.returncode != 0:
+    javac_path = shutil.which("javac")
+    if javac_path is None:
         log("  javac not available, keeping pre-compiled DEX (may contain 'frida' strings)", "WARN")
         return
 
@@ -305,13 +375,9 @@ def rebuild_helper_dex(frida_dir: Path, custom_name: str):
             break
 
     if android_jar is None:
-        # Search more broadly
-        result = subprocess.run(
-            "find /usr/local/lib/android -name 'android.jar' 2>/dev/null | head -1",
-            shell=True, capture_output=True, text=True
-        )
-        if result.stdout.strip():
-            android_jar = Path(result.stdout.strip())
+        android_root = Path("/usr/local/lib/android")
+        if android_root.exists():
+            android_jar = next(iter(sorted(android_root.rglob("android.jar"), reverse=True)), None)
 
     if android_jar is None:
         log("  android.jar not found, keeping pre-compiled DEX", "WARN")
@@ -320,14 +386,26 @@ def rebuild_helper_dex(frida_dir: Path, custom_name: str):
     log(f"  Recompiling helper DEX (android.jar: {android_jar.name})...", "STEP")
 
     # Step 1: javac -> .class files
-    javac_cmd = (
-        f"javac -cp .:{android_jar} -bootclasspath {android_jar} "
-        f"-source 1.8 -target 1.8 "
-        f"-Xlint:-options "  # suppress bootclasspath warning
-        f"{java_file} -d {java_build}"
+    result = run(
+        [
+            javac_path,
+            "-cp",
+            f".{os.pathsep}{android_jar}",
+            "-bootclasspath",
+            android_jar,
+            "-source",
+            "1.8",
+            "-target",
+            "1.8",
+            "-Xlint:-options",
+            java_file,
+            "-d",
+            java_build,
+        ],
+        cwd=helper_dir,
+        check=False,
+        capture_output=True,
     )
-    result = subprocess.run(javac_cmd, shell=True, cwd=str(helper_dir),
-                            capture_output=True, text=True)
     if result.returncode != 0:
         log(f"  javac failed: {result.stderr[:200]}", "WARN")
         log("  Keeping pre-compiled DEX", "WARN")
@@ -343,19 +421,23 @@ def rebuild_helper_dex(frida_dir: Path, custom_name: str):
 
     # Step 2: Package into JAR first (avoids d8 "defined multiple times" error)
     jar_file = build_dir / f"{custom_name}-helper.jar"
-    jar_cmd = f"jar cfe {jar_file} re.{custom_name}.Helper -C {java_build} ."
-    result = subprocess.run(jar_cmd, shell=True, cwd=str(helper_dir),
-                            capture_output=True, text=True)
+    jar_path = shutil.which("jar")
+    if jar_path is None:
+        log("  jar not found, keeping pre-compiled DEX", "WARN")
+        return
+    result = run(
+        [jar_path, "cfe", jar_file, f"re.{custom_name}.Helper", "-C", java_build, "."],
+        cwd=helper_dir,
+        check=False,
+        capture_output=True,
+    )
     if result.returncode != 0:
         log(f"  jar failed: {result.stderr[:200]}", "WARN")
         return
 
     # Step 3: Convert JAR to DEX using d8
-    d8_path = None
-    d8_check = subprocess.run(["which", "d8"], capture_output=True, text=True)
-    if d8_check.returncode == 0:
-        d8_path = "d8"
-    else:
+    d8_path = shutil.which("d8")
+    if d8_path is None:
         # Try d8 from Android SDK build-tools
         if sdk_root:
             bt_dir = Path(sdk_root) / "build-tools"
@@ -366,20 +448,21 @@ def rebuild_helper_dex(frida_dir: Path, custom_name: str):
                         d8_path = str(candidate)
                         break
         if d8_path is None:
-            find_result = subprocess.run(
-                "find /usr/local/lib/android -name 'd8' -type f 2>/dev/null | head -1",
-                shell=True, capture_output=True, text=True
-            )
-            if find_result.stdout.strip():
-                d8_path = find_result.stdout.strip()
+            android_root = Path("/usr/local/lib/android")
+            if android_root.exists():
+                found_d8 = next(iter(sorted(android_root.rglob("d8"), reverse=True)), None)
+                if found_d8 is not None:
+                    d8_path = str(found_d8)
 
     if d8_path is None:
         log("  d8 not found, keeping pre-compiled DEX", "WARN")
         return
-    dex_cmd = f"{d8_path} --lib {android_jar} --output {build_dir} {jar_file}"
-
-    result = subprocess.run(dex_cmd, shell=True, cwd=str(helper_dir),
-                            capture_output=True, text=True)
+    result = run(
+        [d8_path, "--lib", android_jar, "--output", build_dir, jar_file],
+        cwd=helper_dir,
+        check=False,
+        capture_output=True,
+    )
     if result.returncode != 0:
         log(f"  d8 failed: {result.stderr[:200]}", "WARN")
         log("  Keeping pre-compiled DEX", "WARN")
@@ -389,7 +472,11 @@ def rebuild_helper_dex(frida_dir: Path, custom_name: str):
     new_dex = build_dir / "classes.dex"
     if new_dex.exists():
         shutil.copy2(new_dex, dex_file)
-        log(f"  Helper DEX rebuilt: {dex_file.stat().st_size} bytes (package: re.{custom_name})", "OK")
+        log(
+            f"  Helper DEX rebuilt: {dex_file.stat().st_size} bytes "
+            f"(package: re.{custom_name})",
+            "OK",
+        )
     else:
         log("  classes.dex not generated, keeping pre-compiled DEX", "WARN")
 
@@ -611,7 +698,11 @@ def find_dex_regions(data: bytes) -> list[tuple[int, int]]:
                 # Valid DEX: header_size=112 (0x70), file_size > header_size
                 if header_size == 112 and file_size > 112 and file_size < 10_000_000:
                     regions.append((pos, pos + file_size))
-                    log(f"    [dex] Protected DEX region: 0x{pos:08x}-0x{pos+file_size:08x} ({file_size} bytes)", "INFO")
+                    log(
+                        f"    [dex] Protected DEX region: "
+                        f"0x{pos:08x}-0x{pos + file_size:08x} ({file_size} bytes)",
+                        "INFO",
+                    )
             idx = pos + 8
     return regions
 
@@ -664,7 +755,9 @@ def apply_binary_patches(binary_path: Path, custom_name: str, extended: bool = F
             new_bytes = bytes.fromhex(new_hex)
             if old_bytes in data:
                 if dex_regions:
-                    data, count = replace_bytes_outside_regions(data, old_bytes, new_bytes, dex_regions)
+                    data, count = replace_bytes_outside_regions(
+                        data, old_bytes, new_bytes, dex_regions
+                    )
                 else:
                     count = data.count(old_bytes)
                     data = data.replace(old_bytes, new_bytes)
@@ -684,8 +777,8 @@ def apply_binary_patches(binary_path: Path, custom_name: str, extended: bool = F
 def configure_arch(frida_dir: Path, arch: str, ndk_path: Path):
     log(f"Configuring for {arch}...", "STEP")
     run(
-        f"./configure --host={arch}",
-        cwd=str(frida_dir),
+        ["./configure", f"--host={arch}"],
+        cwd=frida_dir,
         env={"ANDROID_NDK_ROOT": str(ndk_path)},
     )
 
@@ -694,8 +787,8 @@ def build_frida(frida_dir: Path, ndk_path: Path):
     cpus = os.cpu_count() or 4
     log(f"Building ({cpus} threads)...", "STEP")
     run(
-        f"make -j{cpus}",
-        cwd=str(frida_dir),
+        ["make", f"-j{cpus}"],
+        cwd=frida_dir,
         env={"ANDROID_NDK_ROOT": str(ndk_path)},
     )
 
@@ -841,8 +934,12 @@ Detection vectors covered:
                         help="Custom name replacing 'frida' everywhere (default: ajeossida)")
     parser.add_argument("--port", "-p", type=int, default=None,
                         help="Custom listening port (default: 27042 unchanged)")
-    parser.add_argument("--extended", "-e", action="store_true",
-                        help="Apply extended anti-detection (D-Bus interfaces, symbols, paths, binary sweep)")
+    parser.add_argument(
+        "--extended",
+        "-e",
+        action="store_true",
+        help="Apply extended anti-detection (D-Bus interfaces, symbols, paths, binary sweep)",
+    )
     parser.add_argument("--temp-fixes", action="store_true",
                         help="Apply stability fixes (perfetto skip, cloak detach)")
     parser.add_argument("--work-dir", "-w", default=None,
@@ -861,19 +958,11 @@ Detection vectors covered:
     args = parser.parse_args()
 
     # Validate
-    version = args.version
+    version = validate_version(args.version)
     frida_major = detect_frida_major(version)
-    custom_name = args.name.lower()
-    archs = [a.strip() for a in args.arch.split(",")]
-
-    for arch in archs:
-        if arch not in ALL_ARCHS:
-            log(f"Unknown architecture: {arch}. Valid: {', '.join(ALL_ARCHS)}", "ERROR")
-            sys.exit(1)
-
-    if len(custom_name) < 3:
-        log("Custom name must be at least 3 characters", "ERROR")
-        sys.exit(1)
+    custom_name = validate_custom_name(args.name)
+    archs = parse_architectures(args.arch)
+    port = validate_port(args.port)
 
     # Directories
     script_dir = Path(__file__).parent.resolve()
@@ -889,7 +978,7 @@ Detection vectors covered:
     log(f"  Version:  Frida {version} (major: {frida_major})", "INFO")
     log(f"  Name:     '{custom_name}'", "INFO")
     log(f"  Archs:    {', '.join(archs)}", "INFO")
-    log(f"  Port:     {args.port or '27042 (default)'}", "INFO")
+    log(f"  Port:     {port or '27042 (default)'}", "INFO")
     log(f"  Extended: {args.extended}", "INFO")
     log(f"  Work dir: {work_dir}", "INFO")
     log(f"  Output:   {output_dir}", "INFO")
@@ -898,8 +987,7 @@ Detection vectors covered:
     if args.ndk_path:
         ndk_path = Path(args.ndk_path).resolve()
         if not ndk_path.exists():
-            log(f"NDK path does not exist: {ndk_path}", "ERROR")
-            sys.exit(1)
+            raise BuildError(f"NDK path does not exist: {ndk_path}")
     else:
         ndk_path = ensure_ndk(work_dir)
     log(f"  NDK:      {ndk_path}", "INFO")
@@ -913,8 +1001,7 @@ Detection vectors covered:
         frida_dir = clone_frida(version, work_dir)
     else:
         if not frida_dir.exists():
-            log("--skip-clone requires existing source in work-dir", "ERROR")
-            sys.exit(1)
+            raise BuildError("--skip-clone requires existing source in work-dir")
         log(f"Using existing source at {frida_dir}", "OK")
 
     # Step 3: Source patches
@@ -923,10 +1010,10 @@ Detection vectors covered:
 
     # Step 3.5: Extended patches
     if args.extended:
-        apply_extended_patches(frida_dir, custom_name, args.port)
-    elif args.port:
+        apply_extended_patches(frida_dir, custom_name, port)
+    elif port:
         # Apply port patch even without --extended
-        apply_extended_patches(frida_dir, custom_name, args.port)
+        apply_extended_patches(frida_dir, custom_name, port)
 
     # Step 4: Stability fixes
     if args.temp_fixes:
@@ -989,11 +1076,15 @@ Detection vectors covered:
     log(f"  adb push output/{server_name} /data/local/tmp/{custom_name}-server", "INFO")
     log(f"  adb shell chmod 755 /data/local/tmp/{custom_name}-server", "INFO")
     log(f"  adb shell /data/local/tmp/{custom_name}-server &", "INFO")
-    if args.port:
-        log(f"  frida -H 127.0.0.1:{args.port} -f <package>", "INFO")
+    if port:
+        log(f"  frida -H 127.0.0.1:{port} -f <package>", "INFO")
     else:
-        log(f"  frida -U -f <package>", "INFO")
+        log("  frida -U -f <package>", "INFO")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BuildError as error:
+        log(str(error), "ERROR")
+        raise SystemExit(1) from error

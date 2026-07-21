@@ -21,6 +21,8 @@ Requirements:
 
 import argparse
 import gzip
+import hashlib
+import json
 import os
 import re
 import shlex
@@ -28,6 +30,7 @@ import shutil
 import struct
 import subprocess
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -986,6 +989,85 @@ def verify_binary(binary_path: Path) -> None:
     log(f"  {binary_path.name}: forbidden-marker scan passed", "OK")
 
 
+def git_revision(path: Path) -> str:
+    """Return the exact Git revision for a repository or submodule."""
+    result = run(["git", "-C", path, "rev-parse", "HEAD"], capture_output=True)
+    revision = (result.stdout or "").strip()
+    if not revision:
+        raise BuildError(f"Could not resolve git revision for {path}")
+    return revision
+
+
+def create_build_info(
+    *,
+    builder_dir: Path,
+    frida_dir: Path,
+    name: str,
+    port: int | None,
+    version: str,
+    architectures: list[str],
+) -> dict[str, object]:
+    """Create release provenance for the builder and upstream source revisions."""
+    repository = os.environ.get("GITHUB_REPOSITORY")
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    workflow_url = (
+        f"https://github.com/{repository}/actions/runs/{run_id}"
+        if repository and run_id
+        else None
+    )
+    return {
+        "architectures": architectures,
+        "builder_commit": git_revision(builder_dir),
+        "built_at": datetime.now(timezone.utc).isoformat(),
+        "frida_commit": git_revision(frida_dir),
+        "frida_core_commit": git_revision(frida_dir / "subprojects/frida-core"),
+        "frida_version": version,
+        "name": name,
+        "ndk_version": NDK_VERSION,
+        "port": port or 27042,
+        "workflow_url": workflow_url,
+    }
+
+
+def write_release_assets(
+    output_dir: Path,
+    *,
+    builder_dir: Path,
+    frida_dir: Path,
+    name: str,
+    port: int | None,
+    version: str,
+    architectures: list[str],
+) -> tuple[Path, Path]:
+    """Write deterministic metadata JSON and checksums for release artifacts."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    info_path = output_dir / "build-info.json"
+    sums_path = output_dir / "SHA256SUMS"
+    info = create_build_info(
+        builder_dir=builder_dir,
+        frida_dir=frida_dir,
+        name=name,
+        port=port,
+        version=version,
+        architectures=architectures,
+    )
+    info_path.write_text(
+        json.dumps(info, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    artifacts = sorted(
+        path
+        for path in output_dir.iterdir()
+        if path.is_file() and path.name not in {info_path.name, sums_path.name}
+    )
+    lines = [
+        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}"
+        for path in artifacts
+    ]
+    sums_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return info_path, sums_path
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -1138,6 +1220,16 @@ Detection vectors covered:
         for f in sorted(output_dir.iterdir()):
             if f.is_file() and not f.name.endswith(".gz"):
                 verify_binary(f)
+
+    write_release_assets(
+        output_dir,
+        builder_dir=script_dir,
+        frida_dir=frida_dir,
+        name=custom_name,
+        port=port,
+        version=version,
+        architectures=archs,
+    )
 
     # Done
     log("=" * 60, "HEADER")

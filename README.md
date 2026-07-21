@@ -54,7 +54,7 @@ Requirements:
 - about 20 GB of free disk space.
 
 If `--ndk-path` is omitted, the builder downloads Android NDK r29 under
-`build/`. A reproducible arm64 build is:
+`build/`. A verified pinned-input arm64 build is:
 
 ```bash
 export ANDROID_SDK_ROOT=/path/to/Android/Sdk
@@ -106,6 +106,8 @@ python3 -m json.tool build-info.json >/dev/null
 ```
 
 Public weekly releases also receive a GitHub build-provenance attestation.
+`SHA256SUMS` identifies one output set; binary hashes are not expected to match
+across different build hosts.
 
 ## Stock-client compatibility
 

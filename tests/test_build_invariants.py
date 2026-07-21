@@ -161,6 +161,22 @@ def test_find_android_jar_uses_sdk_platform(
     assert build.find_android_jar() == android_jar
 
 
+def test_find_android_jar_ignores_unrelated_recursive_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    android_jar = tmp_path / "platforms/android-36/android.jar"
+    android_jar.parent.mkdir(parents=True)
+    android_jar.write_bytes(b"platform")
+    unrelated = tmp_path / "zzz/vendor/android.jar"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_bytes(b"unrelated")
+    monkeypatch.setenv("ANDROID_SDK_ROOT", str(tmp_path))
+    monkeypatch.delenv("ANDROID_HOME", raising=False)
+    monkeypatch.setattr(build, "ANDROID_FALLBACK_ROOTS", ())
+
+    assert build.find_android_jar() == android_jar
+
+
 def test_find_d8_fails_when_sdk_has_no_build_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -177,6 +193,33 @@ def test_find_d8_uses_sdk_jar_entry_point(tmp_path: Path, monkeypatch: pytest.Mo
     d8_jar = tmp_path / "build-tools/36.0.0/lib/d8.jar"
     d8_jar.parent.mkdir(parents=True)
     d8_jar.write_bytes(b"jar")
+    monkeypatch.setenv("ANDROID_SDK_ROOT", str(tmp_path))
+    monkeypatch.delenv("ANDROID_HOME", raising=False)
+    monkeypatch.setattr(build, "ANDROID_FALLBACK_ROOTS", ())
+    monkeypatch.setattr(
+        build.shutil,
+        "which",
+        lambda name: "/usr/bin/java" if name == "java" else None,
+    )
+
+    assert build.find_d8_command() == [
+        "/usr/bin/java",
+        "-cp",
+        str(d8_jar),
+        "com.android.tools.r8.D8",
+    ]
+
+
+def test_find_d8_ignores_unrelated_recursive_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d8_jar = tmp_path / "build-tools/36.0.0/lib/d8.jar"
+    d8_jar.parent.mkdir(parents=True)
+    d8_jar.write_bytes(b"jar")
+    unrelated = tmp_path / "zzz/vendor/d8"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_bytes(b"unrelated")
+    unrelated.chmod(0o755)
     monkeypatch.setenv("ANDROID_SDK_ROOT", str(tmp_path))
     monkeypatch.delenv("ANDROID_HOME", raising=False)
     monkeypatch.setattr(build, "ANDROID_FALLBACK_ROOTS", ())

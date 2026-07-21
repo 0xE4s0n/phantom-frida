@@ -178,18 +178,24 @@ def _android_sdk_roots() -> tuple[Path, ...]:
     return tuple(dict.fromkeys(roots))
 
 
+def _sdk_version_key(path: Path) -> tuple[int, ...]:
+    """Sort SDK package paths by their numeric version components."""
+    package_dir = path.parent.parent if path.name == "d8.jar" else path.parent
+    return tuple(int(component) for component in re.findall(r"\d+", package_dir.name))
+
+
 def find_android_jar() -> Path:
     """Find the newest available Android platform API JAR."""
     candidates = {
         candidate
         for root in _android_sdk_roots()
         if root.exists()
-        for candidate in root.rglob("android.jar")
+        for candidate in root.glob("platforms/*/android.jar")
         if candidate.is_file()
     }
     if not candidates:
         raise BuildError("Required Android SDK platform file is missing: android.jar")
-    return sorted(candidates, key=os.fspath, reverse=True)[0]
+    return max(candidates, key=_sdk_version_key)
 
 
 def find_d8_command() -> list[str]:
@@ -199,20 +205,24 @@ def find_d8_command() -> list[str]:
         return [executable]
 
     roots = [root for root in _android_sdk_roots() if root.exists()]
-    executables = {
+    executables: set[Path] = {
         candidate
         for root in roots
-        for candidate in root.rglob("d8")
+        for candidate in root.glob("build-tools/*/d8")
         if candidate.is_file() and os.access(candidate, os.X_OK)
     }
     if executables:
-        return [os.fspath(sorted(executables, key=os.fspath, reverse=True)[0])]
+        d8_executable = max(executables, key=_sdk_version_key)
+        return [os.fspath(d8_executable)]
 
-    jars = {
-        candidate for root in roots for candidate in root.rglob("d8.jar") if candidate.is_file()
+    jars: set[Path] = {
+        candidate
+        for root in roots
+        for candidate in root.glob("build-tools/*/lib/d8.jar")
+        if candidate.is_file()
     }
     if jars:
-        d8_jar = sorted(jars, key=os.fspath, reverse=True)[0]
+        d8_jar = max(jars, key=_sdk_version_key)
         return [
             require_executable("java"),
             "-cp",

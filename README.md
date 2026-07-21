@@ -71,7 +71,7 @@ Useful options:
 
 ```text
 --version, -v    Exact Frida semantic version (required)
---name, -n       Lowercase replacement name, 3-32 characters
+--name, -n       Lowercase replacement name, 3-20 characters
 --arch, -a       One or more supported Android architectures
 --port, -p       Listening port; omitted keeps 27042
 --extended, -e   Apply the optional extended identifier transformations

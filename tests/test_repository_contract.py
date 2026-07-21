@@ -24,6 +24,7 @@ def test_readme_does_not_overclaim_protocol_or_version_support() -> None:
     assert "Gadget" in readme
     assert "SHA256SUMS" in readme
     assert "android_smoke.py" in readme
+    assert "3-20 characters" in readme
 
 
 def test_codeql_is_pinned_and_has_minimal_permissions() -> None:

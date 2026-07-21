@@ -27,6 +27,18 @@ def make_core_fixture(tmp_path: Path) -> Path:
         (FIXTURE_DIR / "zymbiote.c").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
+    exit_monitor = core / "lib/payload/exit-monitor.vala"
+    exit_monitor.parent.mkdir(parents=True)
+    exit_monitor.write_text(
+        (FIXTURE_DIR / "exit-monitor.vala").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    exceptor = tmp_path / "subprojects/frida-gum/gum/backend-posix/gumexceptor-posix.c"
+    exceptor.parent.mkdir(parents=True)
+    exceptor.write_text(
+        (FIXTURE_DIR / "gumexceptor-posix.c").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     return tmp_path
 
 
@@ -55,6 +67,9 @@ def test_required_patches_rename_jni_and_every_zymbiote_template(tmp_path: Path)
     assert "/frida-zymbiote-" not in combined
     assert "re/oemcodec/HelperBackend" in combined
     assert combined.count("/oemcodec-zymbiote-") == 3
+    assert "interceptor.attach" not in combined
+    assert "gum_exceptor_backend_replacement_signal, NULL" not in combined
+    assert "Signal interception intentionally disabled" in combined
 
 
 def test_required_patch_fails_when_upstream_contract_drifts(tmp_path: Path) -> None:

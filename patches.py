@@ -52,6 +52,44 @@ def get_required_file_patches(name: str) -> list[RequiredFilePatch]:
             '"/frida-zymbiote-',
             f'"/{name}-zymbiote-',
         ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/payload/exit-monitor.vala",
+            (
+                """\t\tconstruct {
+\t\t\tvar interceptor = Gum.Interceptor.obtain ();
+
+\t\t\tunowned Gum.InvocationListener listener = this;
+
+#if WINDOWS
+\t\t\tinterceptor.attach ((void *) """
+                """Gum.Process.find_module_by_name (\"kernel32.dll\")."""
+                """find_export_by_name (\"ExitProcess\"),
+\t\t\t\tlistener);
+#else
+\t\t\tvar libc = Gum.Process.get_libc_module ();
+\t\t\tconst string[] apis = {
+\t\t\t\t\"exit\",
+\t\t\t\t\"_exit\",
+\t\t\t\t\"abort\",
+\t\t\t};
+\t\t\tforeach (var symbol in apis) {
+\t\t\t\tinterceptor.attach ((void *) libc.find_export_by_name (symbol), listener);
+\t\t\t}
+#endif
+\t\t}"""
+            ),
+            """\t\tconstruct {
+\t\t\t// Exit interception intentionally disabled.
+\t\t}""",
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-gum/gum/backend-posix/gumexceptor-posix.c",
+            """    gum_interceptor_replace (interceptor, gum_original_signal,
+        gum_exceptor_backend_replacement_signal, NULL, &options);
+    gum_interceptor_replace (interceptor, gum_original_sigaction,
+        gum_exceptor_backend_replacement_sigaction, NULL, &options);""",
+            "    (void) options; /* Signal interception intentionally disabled. */",
+        ),
     ]
 
 
@@ -232,44 +270,6 @@ MEMFD_PATCHES = {
         "old": "return Linux.syscall (LinuxSyscall.MEMFD_CREATE, name, flags);",
         "new": 'return Linux.syscall (LinuxSyscall.MEMFD_CREATE, "jit-cache", flags);',
     },
-}
-
-
-# ============================================================================
-# [A] LIBC HOOK DISABLING — prevents detection via hooked libc functions
-# ============================================================================
-
-LIBC_HOOK_PATCHES = {
-    # exit-monitor.vala: disable interceptor.attach for exit/_exit/abort hooks
-    # Verified in 17.16.3: pattern still "interceptor.attach"
-    # Multiple occurrences (Windows ExitProcess + POSIX exit/_exit/abort)
-    "exit_monitor": [
-        ("interceptor.attach", "// interceptor.attach"),
-    ],
-    # gumexceptor-posix.c: disable signal/sigaction replacement
-    # Verified exact lines in 17.16.3:
-    #   gum_interceptor_replace (interceptor, gum_original_signal,
-    #       gum_exceptor_backend_replacement_signal, self, NULL);
-    #   gum_interceptor_replace (interceptor, gum_original_sigaction,
-    #       gum_exceptor_backend_replacement_sigaction, self, NULL);
-    "exceptor": [
-        (
-            "gum_interceptor_replace (interceptor, gum_original_signal,",
-            "// gum_interceptor_replace (interceptor, gum_original_signal,",
-        ),
-        (
-            "gum_exceptor_backend_replacement_signal, self, NULL);",
-            "// gum_exceptor_backend_replacement_signal, self, NULL);",
-        ),
-        (
-            "gum_interceptor_replace (interceptor, gum_original_sigaction,",
-            "// gum_interceptor_replace (interceptor, gum_original_sigaction,",
-        ),
-        (
-            "gum_exceptor_backend_replacement_sigaction, self, NULL);",
-            "// gum_exceptor_backend_replacement_sigaction, self, NULL);",
-        ),
-    ],
 }
 
 

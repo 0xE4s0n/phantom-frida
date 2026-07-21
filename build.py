@@ -36,7 +36,6 @@ from tempfile import TemporaryDirectory
 
 from patches import (
     DETECTION_VECTORS,
-    LIBC_HOOK_PATCHES,
     MEMFD_PATCHES,
     SELINUX_PATCHES,
     get_binary_patches,
@@ -642,7 +641,6 @@ def apply_targeted_patches(frida_dir: Path, custom_name: str, frida_major: int):
 
     cap_name = custom_name[0].upper() + custom_name[1:]
     core_dir = frida_dir / "subprojects" / "frida-core"
-    gum_dir = frida_dir / "subprojects" / "frida-gum"
 
     # --- memfd_create: hide agent name in /proc/pid/fd ---
     memfd_cfg = MEMFD_PATCHES.get(frida_major, MEMFD_PATCHES[17])
@@ -655,22 +653,6 @@ def apply_targeted_patches(frida_dir: Path, custom_name: str, frida_major: int):
             log(f"  memfd_create: pattern not found in {memfd_cfg['file']}", "WARN")
     else:
         log(f"  memfd file missing: {memfd_cfg['file']}", "WARN")
-
-    # --- Disable exit monitor (prevents detection via hooked exit/_exit/abort) ---
-    exit_monitor = core_dir / "lib" / "payload" / "exit-monitor.vala"
-    if exit_monitor.exists():
-        for old, new in LIBC_HOOK_PATCHES["exit_monitor"]:
-            count = replace_in_file(exit_monitor, old, new)
-            if count:
-                log(f"  exit-monitor: disabled interceptor.attach ({count})", "OK")
-
-    # --- Disable signal/sigaction hooking ---
-    exceptor = gum_dir / "gum" / "backend-posix" / "gumexceptor-posix.c"
-    if exceptor.exists():
-        for old, new in LIBC_HOOK_PATCHES["exceptor"]:
-            count = replace_in_file(exceptor, old, new)
-            if count:
-                log(f"  gumexceptor: disabled hook ({count})", "OK")
 
     # --- SELinux labels (in linjector.vala for 17.x) ---
     for old, new in SELINUX_PATCHES(custom_name):
